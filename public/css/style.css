@@ -1,0 +1,79 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --ink: #1b2233;
+  --paper: #f6f4ec;
+  --accent: #e3350d;   /* Poké red */
+  --accent2: #3b5ca8;  /* trainer blue */
+}
+
+html, body {
+  height: 100%;
+  background: #0e1220;
+  color: var(--paper);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  overflow: hidden;
+  -webkit-font-smoothing: none;
+}
+
+#game { position: fixed; inset: 0; display: grid; place-items: center; }
+#game canvas { image-rendering: pixelated; box-shadow: 0 10px 40px rgba(0,0,0,.6); }
+
+#ui { position: fixed; inset: 0; pointer-events: none; }
+
+/* HUD */
+#hud {
+  position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+  display: flex; gap: 16px; align-items: center;
+  background: rgba(14,18,32,.82); border: 2px solid #2c3550; border-radius: 10px;
+  padding: 7px 14px; font-size: 12px; white-space: nowrap;
+}
+#online { color: #7ee787; font-weight: bold; }
+#online.off { color: #ff7b72; }
+#hint { color: #9aa4bf; }
+
+/* Chat */
+#chat {
+  position: absolute; left: 12px; bottom: 12px; width: 320px;
+  display: flex; flex-direction: column; gap: 6px; pointer-events: auto;
+}
+#log {
+  height: 150px; overflow-y: auto; display: flex; flex-direction: column; gap: 3px;
+  background: rgba(14,18,32,.72); border: 2px solid #2c3550; border-radius: 10px;
+  padding: 8px; font-size: 12px; line-height: 1.35;
+}
+#log .row { word-wrap: break-word; }
+#log .who { color: #ffd866; font-weight: bold; }
+#log .sys { color: #8b9bc4; font-style: italic; }
+#chatInput {
+  background: rgba(14,18,32,.9); border: 2px solid #2c3550; border-radius: 10px;
+  color: var(--paper); padding: 8px 10px; font: inherit; font-size: 12px; outline: none;
+}
+#chatInput:focus { border-color: var(--accent2); }
+
+/* Name overlay */
+#nameOverlay {
+  position: absolute; inset: 0; display: grid; place-items: center;
+  background: radial-gradient(circle at 50% 40%, #1a2340, #0b0f1c 70%);
+  pointer-events: auto;
+}
+#nameOverlay.hidden { display: none; }
+.panel {
+  text-align: center; background: #131a2e; border: 3px solid var(--accent);
+  border-radius: 16px; padding: 30px 34px; box-shadow: 0 12px 50px rgba(0,0,0,.6);
+}
+.panel h1 { font-size: 22px; letter-spacing: .5px; margin-bottom: 6px; }
+.panel p { color: #9aa4bf; font-size: 12px; margin-bottom: 20px; }
+.panel input {
+  display: block; width: 260px; margin: 0 auto 14px; text-align: center;
+  background: #0e1424; border: 2px solid #2c3550; border-radius: 10px;
+  color: var(--paper); padding: 11px; font: inherit; font-size: 14px; outline: none;
+}
+.panel input:focus { border-color: var(--accent2); }
+.panel button {
+  background: var(--accent); color: #fff; border: none; border-radius: 10px;
+  padding: 11px 26px; font: inherit; font-size: 14px; font-weight: bold; cursor: pointer;
+  transition: transform .05s ease, filter .1s ease;
+}
+.panel button:hover { filter: brightness(1.1); }
+.panel button:active { transform: translateY(1px); }

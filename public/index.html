@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>Kanto ↔ Paldea Online</title>
+  <link rel="icon" href="data:," />
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+  <div id="game"></div>
+
+  <div id="ui">
+    <div id="hud">
+      <span id="online">● connecting…</span>
+      <span id="hint">Arrows / WASD to move · walk into a trainer to battle</span>
+    </div>
+
+    <div id="chat">
+      <div id="log"></div>
+      <input id="chatInput" type="text" maxlength="120" placeholder="Press Enter to chat…" autocomplete="off" />
+    </div>
+
+    <div id="nameOverlay">
+      <div class="panel">
+        <h1>Kanto&nbsp;↔&nbsp;Paldea&nbsp;Online</h1>
+        <p>Gen 1 + Gen 9 · a tiny PokeMMO slice</p>
+        <input id="nameInput" type="text" maxlength="16" placeholder="Trainer name" autocomplete="off" />
+        <input id="lineInput" type="text" maxlength="70" placeholder="Battle line (what you say before a fight)" autocomplete="off" />
+        <button id="enterBtn">Enter world</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/vendor/phaser.min.js"></script>
+  <script src="/js/net.js"></script>
+  <script src="/js/scenes/BootScene.js"></script>
+  <script src="/js/scenes/WorldScene.js"></script>
+  <script src="/js/scenes/BattleScene.js"></script>
+  <script src="/js/main.js"></script>
+</body>
+</html>
