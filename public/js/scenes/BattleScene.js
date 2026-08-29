@@ -22,8 +22,8 @@ class BattleScene extends Phaser.Scene {
     this.add.rectangle(0, H * 0.62, W, H * 0.38, 0x0e1220).setOrigin(0);
 
     // foe (top-right) + your mon (bottom-left)
-    this.drawMon(this.foe.mon, W * 0.72, H * 0.24, 26, true);
-    this.drawMon(this.you.mon, W * 0.24, H * 0.50, 34, false);
+    this.drawMon(this.foe.mon, W * 0.72, H * 0.24, 54, true);
+    this.drawMon(this.you.mon, W * 0.26, H * 0.50, 74, false);
 
     // info boxes
     this.foeBox = this.makeInfoBox(this.foe.mon, W * 0.06, H * 0.08, false);
@@ -46,16 +46,21 @@ class BattleScene extends Phaser.Scene {
     this.events.once('shutdown', () => this.unwire());
   }
 
-  drawMon(mon, x, y, r, isFoe) {
-    const color = TYPE_COLOR[mon.type] || 0xaaaaaa;
-    this.add.ellipse(x, y + r * 0.9, r * 2.2, r * 0.7, 0x000000, 0.28);   // shadow
-    const body = this.add.circle(x, y, r, color).setStrokeStyle(3, 0x0e1220);
-    this.add.circle(x - r * 0.32, y - r * 0.28, r * 0.16, 0xffffff, 0.85); // eye glint
-    this.add.text(x, y, mon.name[0], { fontFamily: 'monospace', fontSize: r, color: '#0e1220',
-      fontStyle: 'bold' }).setOrigin(0.5);
-    const gbadge = `GEN ${mon.gen}`;
-    this.add.text(x, y + r + 8, gbadge, { fontFamily: 'monospace', fontSize: 9,
-      color: '#ffd866' }).setOrigin(0.5);
+  drawMon(mon, x, y, targetH, isFoe) {
+    const key = `mon_${mon.key}`;
+    this.add.ellipse(x, y + targetH * 0.5, targetH * 0.85, targetH * 0.26, 0x000000, 0.28); // shadow
+    let body;
+    if (mon.key && this.textures.exists(key)) {
+      body = this.add.image(x, y, key).setOrigin(0.5, 0.5);
+      body.setScale(targetH / body.height);
+    } else {                                       // fallback: type-coloured blob
+      const color = TYPE_COLOR[mon.type] || 0xaaaaaa;
+      body = this.add.circle(x, y, targetH * 0.5, color).setStrokeStyle(3, 0x0e1220);
+      this.add.text(x, y, mon.name[0], { fontFamily: 'monospace', fontSize: targetH * 0.5,
+        color: '#0e1220', fontStyle: 'bold' }).setOrigin(0.5);
+    }
+    this.add.text(x, y + targetH * 0.5 + 8, `GEN ${mon.gen}`, { fontFamily: 'monospace',
+      fontSize: 9, color: '#ffd866' }).setOrigin(0.5);
     if (isFoe) this.foeBody = body; else this.youBody = body;
   }
 

@@ -14,6 +14,9 @@ class BootScene extends Phaser.Scene {
       const id = String(i).padStart(2, '0');
       this.load.image(`char_${id}`, `/assets/chars/char_${id}.png`);
     }
+    // Pokémon battle sprites (species key -> mon_<key>)
+    ['bulbasaur', 'charmander', 'squirtle', 'pikachu', 'sprigatito', 'fuecoco', 'quaxly']
+      .forEach((k) => this.load.image(`mon_${k}`, `/assets/mons/${k}.png`));
 
     const bar = this.add.rectangle(0, 0, 0, 4, 0xe3350d).setOrigin(0, 0.5);
     const cx = this.scale.width / 2, cy = this.scale.height / 2;

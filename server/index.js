@@ -70,7 +70,7 @@ function startBattle(a, b) {
       t: 'battleStart', battleId: id,
       you: { name: me.entity.name, mon: me.mon, moves: me.mon.moves.map(m => ({ key: m, ...MOVES[m] })) },
       foe: { name: foe.entity.name, line: foe.entity.line || '',
-             mon: { name: foe.mon.name, type: foe.mon.type, dex: foe.mon.dex,
+             mon: { key: foe.mon.key, name: foe.mon.name, type: foe.mon.type, dex: foe.mon.dex,
                     gen: foe.mon.gen, hp: foe.mon.hp, maxhp: foe.mon.maxhp } },
     });
   }
