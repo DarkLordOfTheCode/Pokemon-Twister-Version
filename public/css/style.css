@@ -31,6 +31,7 @@ html, body {
 #online { color: #7ee787; font-weight: bold; }
 #online.off { color: #ff7b72; }
 #hint { color: #9aa4bf; }
+#prog { color: #ffd866; font-weight: bold; }
 
 /* Chat */
 #chat {
@@ -69,7 +70,12 @@ html, body {
   background: #0e1424; border: 2px solid #2c3550; border-radius: 10px;
   color: var(--paper); padding: 11px; font: inherit; font-size: 14px; outline: none;
 }
-.panel input:focus { border-color: var(--accent2); }
+.panel input:focus, .panel select:focus { border-color: var(--accent2); }
+.panel select {
+  display: block; width: 284px; margin: 0 auto 14px; text-align: center;
+  background: #0e1424; border: 2px solid #2c3550; border-radius: 10px;
+  color: var(--paper); padding: 11px; font: inherit; font-size: 14px; outline: none;
+}
 .panel button {
   background: var(--accent); color: #fff; border: none; border-radius: 10px;
   padding: 11px 26px; font: inherit; font-size: 14px; font-weight: bold; cursor: pointer;

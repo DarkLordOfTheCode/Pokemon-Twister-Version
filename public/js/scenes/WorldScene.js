@@ -16,8 +16,10 @@ class WorldScene extends Phaser.Scene {
     // our player
     this.me = { tx: init.you.x, ty: init.you.y, dir: init.you.dir, charId: init.you.charId };
     this.player = this.makeTrainer(init.you.charId, init.you.x, init.you.y);
-    this.meLabel = this.makeLabel(init.you.name, init.you.x, init.you.y);
     this.meName = init.you.name;
+    this.meLevel = init.progress.level;
+    this.meLabel = this.makeLabel(this.labelFor(this.meName, this.meLevel), init.you.x, init.you.y);
+    window.ui.setProgress(init.progress);
 
     // existing players
     init.players.forEach((p) => this.addOther(p));
@@ -36,7 +38,7 @@ class WorldScene extends Phaser.Scene {
 
     this.wireNetwork();
     window.ui.setOnline(init.players.length + 1);
-    window.ui.log(null, 'Welcome to Kanto ↔ Paldea Online!', true);
+    window.ui.log(null, 'Welcome to Pokémon Twister Version!', true);
   }
 
   // ---------- map ----------
@@ -73,6 +75,7 @@ class WorldScene extends Phaser.Scene {
     s.setDepth(ty * this.T + this.T + 1);
     return s;
   }
+  labelFor(name, level) { return level ? `${name} Lv${level}` : name; }
   makeLabel(name, tx, ty) {
     const t = this.add.text(tx * this.T + this.T / 2, ty * this.T - 6, name,
       { fontFamily: 'monospace', fontSize: 10, color: '#ffffff',
@@ -82,9 +85,11 @@ class WorldScene extends Phaser.Scene {
   }
   addOther(p) {
     const sprite = this.makeTrainer(p.charId, p.x, p.y);
-    const label = this.makeLabel(p.name, p.x, p.y);
+    const label = this.makeLabel(this.labelFor(p.name, p.level), p.x, p.y);
     if (p.inBattle) sprite.setTint(0x9aa4bf);
-    this.others.set(p.id, { sprite, label, tx: p.x, ty: p.y, charId: p.charId });
+    if (p.isNPC) label.setColor('#ffd866');        // trainers you can challenge solo
+    this.others.set(p.id, { sprite, label, tx: p.x, ty: p.y, charId: p.charId,
+                            name: p.name, level: p.level });
   }
   placeSprite(sprite, label, tx, ty) {
     const px = tx * this.T + this.T / 2, py = ty * this.T + this.T;
@@ -124,6 +129,11 @@ class WorldScene extends Phaser.Scene {
     window.net.send({ t: 'move', tx: nx, ty: ny, dir });
   }
 
+  setMyLevel(level) {
+    this.meLevel = level;
+    this.meLabel.setText(this.labelFor(this.meName, this.meLevel));
+  }
+
   lockBriefly() { this.moving = true; this.time.delayedCall(120, () => { this.moving = false; }); }
 
   faceSprite(sprite, dir) { sprite.setFlipX(dir === 'left'); }
@@ -160,7 +170,15 @@ class WorldScene extends Phaser.Scene {
     });
     window.net.on('playerName', (m) => {
       const o = this.others.get(m.id);
-      if (o) o.label.setText(m.name);
+      if (o) { o.name = m.name; o.label.setText(this.labelFor(o.name, o.level)); }
+    });
+    window.net.on('playerLevel', (m) => {
+      const o = this.others.get(m.id);
+      if (o) { o.level = m.level; o.label.setText(this.labelFor(o.name, o.level)); }
+    });
+    window.net.on('progress', (m) => {
+      window.ui.setProgress(m.you);
+      this.setMyLevel(m.you.level);
     });
     window.net.on('playerBattling', (m) => {
       if (m.id === this.myId) return;
@@ -168,7 +186,10 @@ class WorldScene extends Phaser.Scene {
       if (o) o.sprite.setTint(m.inBattle ? 0x9aa4bf : 0xffffff), (!m.inBattle && o.sprite.clearTint());
     });
     window.net.on('chat', (m) => window.ui.log(m.name, m.text));
-    window.net.on('nameOk', (m) => { this.meName = m.name; this.meLabel.setText(m.name); });
+    window.net.on('nameOk', (m) => {
+      this.meName = m.name;
+      this.meLabel.setText(this.labelFor(this.meName, this.meLevel));
+    });
 
     // battle handoff
     window.net.on('battleStart', (m) => {
@@ -177,9 +198,10 @@ class WorldScene extends Phaser.Scene {
       this.scene.launch('Battle', m);
       this.scene.pause();
     });
-    window.net.on('battleEnd', () => {
+    window.net.on('battleEnd', (m) => {
       this.inBattle = false;
       document.getElementById('chat').style.display = '';
+      if (m.you) { window.ui.setProgress(m.you); this.setMyLevel(m.you.level); }
     });
 
     window.net.on('_close', () => window.ui.setOnline(0, true));

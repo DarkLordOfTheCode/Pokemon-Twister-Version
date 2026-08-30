@@ -1,7 +1,7 @@
-// PokeMMO-style slice: authoritative-lite Node server.
+// Pokémon Twister Version — authoritative-lite Node server.
 // - serves the Phaser client from /public and Phaser itself from /vendor
 // - tracks players in a shared overworld over WebSockets
-// - runs turn-based battles when two trainers collide
+// - runs level-based turn battles when two trainers collide
 //
 // Wire protocol is newline-free JSON objects with a `t` (type) field.
 
@@ -11,24 +11,35 @@ const express = require('express');
 const { WebSocketServer } = require('ws');
 
 const map = require('./map');
-const { SPECIES, MOVES, typeEffect } = require('./data');
+const {
+  SPECIES, MOVES, PLAYABLE_KEYS, MAX_LEVEL,
+  typeEffect, makeMon, xpToNext, xpForWin,
+} = require('./data');
 
 const PORT = process.env.PORT || 3000;
 const app = express();
 app.use(express.static(path.join(__dirname, '..', 'public')));
 app.use('/vendor', express.static(path.join(__dirname, '..', 'node_modules', 'phaser', 'dist')));
 
+// The client preloads one sprite per species and builds the partner picker from
+// this, so the roster only ever has to be edited in data.js.
+app.get('/api/species', (_req, res) => {
+  res.json(Object.entries(SPECIES).map(([key, s]) => ({
+    key, name: s.name, gen: s.gen, dex: s.dex, types: s.types, tier: s.tier,
+  })));
+});
+
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
 // ---- world state ----
-const players = new Map();   // id -> { id, name, charId, x, y, dir, ws, battleId }
+const players = new Map();   // id -> { id, name, charId, x, y, dir, ws, battleId, species, level, xp }
 const npcs = new Map();      // id -> wandering NPC trainer (ws:null, isNPC:true)
 const battles = new Map();   // id -> battle session
 let nextId = 1;
 let nextBattleId = 1;
 const NUM_CHARS = 19;        // char_00 .. char_18
-const SPECIES_KEYS = Object.keys(SPECIES);
+const START_LEVEL = 5;
 
 function send(ws, obj) {
   if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj));
@@ -39,25 +50,45 @@ function broadcast(obj, exceptId) {
     if (p.id !== exceptId && p.ws.readyState === 1) p.ws.send(s);
 }
 function publicPlayer(p) {
-  return { id: p.id, name: p.name, charId: p.charId, x: p.x, y: p.y, dir: p.dir, inBattle: !!p.battleId };
+  return { id: p.id, name: p.name, charId: p.charId, x: p.x, y: p.y, dir: p.dir,
+           level: p.level, isNPC: !!p.isNPC, inBattle: !!p.battleId };
 }
-function freshMon(key) {
-  const s = SPECIES[key];
-  return { key, name: s.name, gen: s.gen, dex: s.dex, type: s.type, maxhp: s.hp, hp: s.hp,
-           atk: s.atk, def: s.def, spd: s.spd, moves: s.moves.slice() };
-}
-function randSpecies() { return SPECIES_KEYS[Math.floor(Math.random() * SPECIES_KEYS.length)]; }
+function randPlayable() { return PLAYABLE_KEYS[Math.floor(Math.random() * PLAYABLE_KEYS.length)]; }
 const entityWs = (e) => (e && e.ws) ? e.ws : null;     // NPCs have ws:null
-const aiMove = (mon) => [...mon.moves].sort((a, b) => MOVES[b].power - MOVES[a].power)[0];
 const tileTaken = (tx, ty, exceptId) =>
   [...players.values(), ...npcs.values()].some(o => o.id !== exceptId && o.x === tx && o.y === ty);
+
+// What the client needs to draw one side of the field.
+function monView(mon, full) {
+  const v = { key: mon.key, name: mon.name, types: mon.types, dex: mon.dex, gen: mon.gen,
+              level: mon.level, hp: mon.hp, maxhp: mon.maxhp };
+  if (full) { v.atk = mon.atk; v.def = mon.def; v.spd = mon.spd; }
+  return v;
+}
+function progress(p) {
+  return { level: p.level, xp: p.xp, xpNext: xpToNext(p.level), species: p.species,
+           speciesName: SPECIES[p.species].name };
+}
+
+// NPCs pick whatever hits hardest against what's actually in front of them —
+// higher-level trainers therefore feel like they're reading your typing.
+function aiMove(mon, foe) {
+  let best = mon.moves[0], bestScore = -1;
+  for (const key of mon.moves) {
+    const mv = MOVES[key];
+    const stab = mon.types.includes(mv.type) ? 1.5 : 1;
+    const score = mv.power * stab * typeEffect(mv.type, foe.types);
+    if (score > bestScore) { bestScore = score; best = key; }
+  }
+  return best;
+}
 
 // ---- battle logic ----
 // `a` is always a connected player; `b` may be another player or an NPC trainer.
 function startBattle(a, b) {
   const id = nextBattleId++;
-  const monA = freshMon(a.species || randSpecies());
-  const monB = freshMon(b.species || randSpecies());
+  const monA = makeMon(a.species || randPlayable(), a.level || START_LEVEL);
+  const monB = makeMon(b.species || randPlayable(), b.level || START_LEVEL);
   const battle = { id, sides: { [a.id]: { entity: a, mon: monA, choice: null },
                                 [b.id]: { entity: b, mon: monB, choice: null } }, order: [a.id, b.id] };
   battles.set(id, battle);
@@ -68,23 +99,28 @@ function startBattle(a, b) {
     const ws = entityWs(me.entity);
     if (ws) send(ws, {
       t: 'battleStart', battleId: id,
-      you: { name: me.entity.name, mon: me.mon, moves: me.mon.moves.map(m => ({ key: m, ...MOVES[m] })) },
-      foe: { name: foe.entity.name, line: foe.entity.line || '',
-             mon: { key: foe.mon.key, name: foe.mon.name, type: foe.mon.type, dex: foe.mon.dex,
-                    gen: foe.mon.gen, hp: foe.mon.hp, maxhp: foe.mon.maxhp } },
+      you: { name: me.entity.name, mon: monView(me.mon, true),
+             moves: me.mon.moves.map(m => ({ key: m, ...MOVES[m] })) },
+      foe: { name: foe.entity.name, line: foe.entity.line || '', mon: monView(foe.mon, false) },
     });
   }
   broadcast({ t: 'playerBattling', id: a.id, inBattle: true });
   broadcast({ t: 'playerBattling', id: b.id, inBattle: true });
 }
 
+// One mon per side and no healing, so the standard formula ends fights in two or
+// three hits. PACE stretches them to roughly five turns without touching the maths.
+const PACE = 0.3;
+
 function damage(attacker, defender, moveKey) {
   const mv = MOVES[moveKey];
-  const eff = typeEffect(mv.type, defender.type);
+  const eff = typeEffect(mv.type, defender.types);
+  const stab = attacker.types.includes(mv.type) ? 1.5 : 1;
   const rnd = 0.85 + Math.random() * 0.15;
-  const dmg = Math.max(1, Math.round(mv.power * (attacker.atk / defender.def) * eff * rnd * 0.4));
+  const base = ((2 * attacker.level) / 5 + 2) * mv.power * (attacker.atk / defender.def) / 50 + 2;
+  const dmg = eff === 0 ? 0 : Math.max(1, Math.round(base * eff * stab * rnd * PACE));
   defender.hp = Math.max(0, defender.hp - dmg);
-  return { dmg, eff, move: mv.name };
+  return { dmg, eff, move: mv.name, type: mv.type };
 }
 
 function resolveBattle(battle) {
@@ -118,15 +154,43 @@ function resolveBattle(battle) {
   if (faintedId !== null) endBattle(battle, faintedId);
 }
 
+// Winning a battle grants XP scaled to the loser's level; losing costs nothing
+// but the walk back. Levels are per-session — there's no save file yet.
+function awardXp(winner, loserLevel) {
+  if (winner.isNPC) return null;
+  const gained = xpForWin(loserLevel);
+  winner.xp += gained;
+  const levels = [];
+  while (winner.level < MAX_LEVEL && winner.xp >= xpToNext(winner.level)) {
+    winner.xp -= xpToNext(winner.level);
+    winner.level += 1;
+    levels.push(winner.level);
+  }
+  if (winner.level >= MAX_LEVEL) winner.xp = 0;
+  return { gained, levels };
+}
+
 function endBattle(battle, loserId) {
   const winnerId = battle.order.find(o => o !== loserId);
+  const winnerSide = battle.sides[winnerId];
+  const loserSide = battle.sides[loserId];
+  const reward = awardXp(winnerSide.entity, loserSide.mon.level);
+
   for (const pid of battle.order) {
     const me = battle.sides[pid];
     const ws = entityWs(me.entity);
-    if (ws) send(ws, { t: 'battleEnd', win: pid === winnerId,
-                       youMon: me.mon.name, result: pid === winnerId ? 'won' : 'lost' });
+    const won = pid === winnerId;
+    if (ws) send(ws, {
+      t: 'battleEnd', win: won, youMon: me.mon.name, result: won ? 'won' : 'lost',
+      xp: won && reward ? reward.gained : 0,
+      levelUps: won && reward ? reward.levels : [],
+      you: progress(me.entity),
+    });
     me.entity.battleId = null;
     broadcast({ t: 'playerBattling', id: pid, inBattle: false });
+  }
+  if (reward && reward.levels.length) {
+    broadcast({ t: 'playerLevel', id: winnerId, level: winnerSide.entity.level });
   }
   battles.delete(battle.id);
 }
@@ -143,13 +207,14 @@ wss.on('connection', (ws) => {
   const id = nextId++;
   const spawn = map.randomSpawn();
   const p = { id, name: 'TrainerJD', charId: (id - 1) % NUM_CHARS,
-              x: spawn.x, y: spawn.y, dir: 'down', ws, battleId: null, line: '' };
+              x: spawn.x, y: spawn.y, dir: 'down', ws, battleId: null, line: '',
+              species: randPlayable(), level: START_LEVEL, xp: 0 };
   players.set(id, p);
 
   send(ws, {
     t: 'init', id, tile: map.TILE, w: map.W, h: map.H,
     ground: map.GROUND, objects: map.OBJECTS,
-    you: publicPlayer(p),
+    you: publicPlayer(p), progress: progress(p),
     players: [...players.values()].filter(o => o.id !== id).map(publicPlayer)
       .concat([...npcs.values()].map(publicPlayer)),
   });
@@ -171,6 +236,14 @@ wss.on('connection', (ws) => {
     if (msg.t === 'setBattleLine' && typeof msg.line === 'string') {
       me.line = msg.line.slice(0, 70);
       send(ws, { t: 'lineOk', line: me.line });
+      return;
+    }
+
+    // Choosing a partner is only allowed before your first battle, and never a boss mon.
+    if (msg.t === 'setSpecies' && typeof msg.species === 'string') {
+      if (me.battleId || !PLAYABLE_KEYS.includes(msg.species)) return;
+      me.species = msg.species;
+      send(ws, { t: 'progress', you: progress(me) });
       return;
     }
 
@@ -212,7 +285,8 @@ wss.on('connection', (ws) => {
       // NPC opponents pick automatically so solo battles resolve immediately
       for (const pid of battle.order) {
         const s = battle.sides[pid];
-        if (!s.choice && s.entity.isNPC) s.choice = aiMove(s.mon);
+        const foe = battle.sides[battle.order.find(o => o !== pid)];
+        if (!s.choice && s.entity.isNPC) s.choice = aiMove(s.mon, foe.mon);
       }
       const both = battle.order.every(pid => battle.sides[pid].choice);
       if (both) resolveBattle(battle);
@@ -231,17 +305,40 @@ wss.on('connection', (ws) => {
   });
 });
 
-// ---- NPC trainers: wander near their home tile, battle players who bump them ----
-// Names + battle lines are left blank for you to fill in (edit these three).
+// ---- NPC trainers ----
+// A rough difficulty ladder: start with the kids near the plaza and work outward.
+// Beekeeper is the wall at the top — swap names, lines, species or levels freely.
 const NPC_DEFS = [
-  { name: '', line: '', charId: 1,  species: 'charmander', x: 11, y: 7  },
-  { name: '', line: '', charId: 15, species: 'sprigatito', x: 16, y: 7  },
-  { name: '', line: '', charId: 6,  species: 'quaxly',     x: 17, y: 10 },
+  { name: 'Youngster Milo',  level: 6,  species: 'charmander',  charId: 1,  x: 11, y: 7,
+    line: "First battle of the day. Go easy on me!" },
+  { name: 'Lass Priya',      level: 8,  species: 'sprigatito',  charId: 15, x: 16, y: 7,
+    line: "My Sprigatito's been practising all week." },
+  { name: 'Swimmer Otto',    level: 10, species: 'quaxly',      charId: 6,  x: 17, y: 10,
+    line: "Water's fine! Get in." },
+  { name: 'Hiker Bruno',     level: 15, species: 'onix',        charId: 3,  x: 6,  y: 13,
+    line: "You'll not dent this one, kid." },
+  { name: 'Firebreather Rue',level: 20, species: 'arcanine',    charId: 8,  x: 22, y: 5,
+    line: "Feel that heat? That's my Arcanine." },
+  { name: 'Psychic Nadia',   level: 25, species: 'alakazam',    charId: 12, x: 5,  y: 4,
+    line: "I already know which move you'll pick." },
+  { name: 'Blackbelt Deniz', level: 30, species: 'machamp',     charId: 4,  x: 24, y: 15,
+    line: "Four arms. One outcome." },
+  { name: 'Hex Maniac Wren', level: 34, species: 'gengar',      charId: 17, x: 3,  y: 10,
+    line: "Shhh. It's already behind you." },
+  { name: 'Ace Trainer Vera',level: 38, species: 'meowscarada', charId: 10, x: 9,  y: 16,
+    line: "No more warm-ups. Show me the real thing." },
+  { name: 'Knight Sable',    level: 42, species: 'kingambit',   charId: 13, x: 20, y: 17,
+    line: "Kneel, or be knelt." },
+  { name: 'Dragon Tamer Ivo',level: 46, species: 'baxcalibur',  charId: 2,  x: 14, y: 17,
+    line: "Ice and dragon. Nothing you have beats both." },
+  { name: 'Beekeeper',       level: 52, species: 'roaringmoon', charId: 18, x: 24, y: 3,
+    line: "Seen a Combee round here? No? ...Figures. My Roaring Moon ate the hive." },
 ];
 NPC_DEFS.forEach((d, i) => {
   const id = 10001 + i;
   npcs.set(id, { id, name: d.name, line: d.line, charId: d.charId, species: d.species,
-                 x: d.x, y: d.y, homeX: d.x, homeY: d.y, dir: 'down', battleId: null, isNPC: true, ws: null });
+                 level: d.level, x: d.x, y: d.y, homeX: d.x, homeY: d.y, dir: 'down',
+                 battleId: null, isNPC: true, ws: null });
 });
 
 setInterval(() => {
@@ -262,6 +359,7 @@ setInterval(() => {
 }, 1500);
 
 server.listen(PORT, () => {
-  console.log(`\n  PokeMMO slice running:  http://localhost:${PORT}`);
-  console.log(`  ${npcs.size} NPC trainers wandering the world\n`);
+  console.log(`\n  Pokémon Twister Version running:  http://localhost:${PORT}`);
+  console.log(`  ${Object.keys(SPECIES).length} species · ${npcs.size} trainers, Lv ` +
+              `${NPC_DEFS[0].level}–${NPC_DEFS[NPC_DEFS.length - 1].level}\n`);
 });

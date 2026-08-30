@@ -10,6 +10,29 @@ const ui = {
     el.classList.remove('off');
     el.textContent = `● ${n} online`;
   },
+  setProgress(p) {
+    document.getElementById('prog').textContent =
+      `${p.speciesName} Lv${p.level} · ${p.xp}/${p.xpNext} XP`;
+  },
+  // Fills the partner dropdown from /api/species; boss mons are NPC-only.
+  buildPartnerPicker(list) {
+    const sel = document.getElementById('partnerSelect');
+    if (!sel || sel.dataset.built) return;
+    sel.dataset.built = '1';
+    for (const gen of [1, 9]) {
+      const group = document.createElement('optgroup');
+      group.label = `Gen ${gen}`;
+      list.filter((s) => s.gen === gen && s.tier !== 'boss')
+          .sort((a, b) => a.dex - b.dex)
+          .forEach((s) => {
+            const opt = document.createElement('option');
+            opt.value = s.key;
+            opt.textContent = `${s.name} (${s.types.join('/')})`;
+            group.appendChild(opt);
+          });
+      sel.appendChild(group);
+    }
+  },
   log(name, text, sys) {
     const log = document.getElementById('log');
     const row = document.createElement('div');
@@ -40,6 +63,8 @@ function enterWorld() {
   if (name) window.net.send({ t: 'setName', name });
   const line = lineInput.value.trim().slice(0, 70);
   if (line) window.net.send({ t: 'setBattleLine', line });
+  const species = document.getElementById('partnerSelect').value;
+  if (species) window.net.send({ t: 'setSpecies', species });
   ui.entered = true;
   nameOverlay.classList.add('hidden');
   document.getElementById('chatInput').blur();
