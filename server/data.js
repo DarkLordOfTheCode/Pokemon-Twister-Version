@@ -61,6 +61,7 @@ const MOVES = {
   // psychic
   confusion:     { name: 'Confusion',      type: 'psychic',  power: 50 },
   psychic:       { name: 'Psychic',        type: 'psychic',  power: 90 },
+  hypnosis:      { name: 'Hypnosis',       type: 'psychic',  power: 0 },
   psyshock:      { name: 'Psyshock',       type: 'psychic',  power: 80 },
   // rock
   rockthrow:     { name: 'Rock Throw',     type: 'rock',     power: 50 },
@@ -92,6 +93,52 @@ const MOVES = {
   moonblast:     { name: 'Moonblast',      type: 'fairy',    power: 95 },
 };
 
+// The five status conditions. `immune` is the typing that shrugs a status off —
+// you can't burn a Fire type or poison a Steel one.
+const STATUS = {
+  par: { name: 'Paralysis', tag: 'PAR', onset: 'was paralysed!',    is: 'paralysed', immune: ['electric'] },
+  frz: { name: 'Freeze',    tag: 'FRZ', onset: 'was frozen solid!', is: 'frozen',    immune: ['ice'] },
+  brn: { name: 'Burn',      tag: 'BRN', onset: 'was burned!',       is: 'burned',    immune: ['fire'] },
+  psn: { name: 'Poison',    tag: 'PSN', onset: 'was poisoned!',     is: 'poisoned',  immune: ['poison', 'steel'] },
+  slp: { name: 'Sleep',     tag: 'SLP', onset: 'fell asleep!',      is: 'asleep',    immune: [] },
+};
+
+// Which moves can leave a status behind, and how often: [status, chance].
+// This is the tuning dial for how swingy battles feel — raise a chance and that
+// move starts deciding fights on its own.
+const MOVE_STATUS = {
+  thundershock: ['par', 0.10],  thunderbolt: ['par', 0.10],
+  thunderpunch: ['par', 0.10],  discharge:   ['par', 0.30],
+  icebeam:      ['frz', 0.10],  icefang:     ['frz', 0.10],
+  iciclecrash:  ['frz', 0.10],
+  ember:        ['brn', 0.10],  flamewheel:  ['brn', 0.10],
+  flamethrower: ['brn', 0.10],  torchsong:   ['brn', 0.20],
+  sludgebomb:   ['psn', 0.30],  acidspray:   ['psn', 0.10],
+  hypnosis:     ['slp', 0.60],
+};
+// Fold it into MOVES so the client gets it for free with the move buttons.
+for (const [key, [status, chance]] of Object.entries(MOVE_STATUS)) {
+  MOVES[key].status = status;
+  MOVES[key].chance = chance;
+}
+
+// Bag items. `heal` restores HP, `cures` clears the listed statuses; using one
+// costs you your turn, so a Potion is never free.
+const ITEMS = {
+  potion:      { name: 'Potion',       price: 200,  heal: 20 },
+  superpotion: { name: 'Super Potion', price: 700,  heal: 50 },
+  hyperpotion: { name: 'Hyper Potion', price: 1200, heal: 120 },
+  antidote:    { name: 'Antidote',     price: 100,  cures: ['psn'] },
+  paralyzheal: { name: 'Paraly Heal',  price: 200,  cures: ['par'] },
+  iceheal:     { name: 'Ice Heal',     price: 250,  cures: ['frz'] },
+  burnheal:    { name: 'Burn Heal',    price: 250,  cures: ['brn'] },
+  awakening:   { name: 'Awakening',    price: 250,  cures: ['slp'] },
+  fullheal:    { name: 'Full Heal',    price: 600,  cures: ['par', 'frz', 'brn', 'psn', 'slp'] },
+};
+const STARTING_BAG = { potion: 2, paralyzheal: 1 };
+const STARTING_MONEY = 800;
+const moneyForWin = (foeLevel) => 40 + foeLevel * 14;
+
 // Sprite files live at /assets/mons/<key>.png — the key is the whole contract.
 // There's one attacking stat rather than a physical/special split, so `atk` is
 // whichever of Attack or Special Attack the species actually fights with —
@@ -117,11 +164,11 @@ const SPECIES = {
   arcanine:   { name: 'Arcanine',   gen: 1, dex: 59,  tier: 'strong',  types: ['fire'],
                 base: { hp: 90, atk: 110, def: 80, spd: 95 }, moves: ['flamethrower','bite','wingattack','bodyslam'] },
   alakazam:   { name: 'Alakazam',   gen: 1, dex: 65,  tier: 'strong',  types: ['psychic'],
-                base: { hp: 55, atk: 135, def: 45, spd: 120 }, moves: ['confusion','psychic','psyshock','shadowball'] },
+                base: { hp: 55, atk: 135, def: 45, spd: 120 }, moves: ['hypnosis','psychic','psyshock','shadowball'] },
   machamp:    { name: 'Machamp',    gen: 1, dex: 68,  tier: 'strong',  types: ['fighting'],
                 base: { hp: 90, atk: 130, def: 80, spd: 55 }, moves: ['karatechop','closecombat','knockoff','stoneedge'] },
   gengar:     { name: 'Gengar',     gen: 1, dex: 94,  tier: 'strong',  types: ['ghost','poison'],
-                base: { hp: 60, atk: 130, def: 60, spd: 110 }, moves: ['shadowsneak','shadowball','sludgebomb','darkpulse'] },
+                base: { hp: 60, atk: 130, def: 60, spd: 110 }, moves: ['hypnosis','shadowball','sludgebomb','darkpulse'] },
   onix:       { name: 'Onix',       gen: 1, dex: 95,  tier: 'starter', types: ['rock','ground'],
                 base: { hp: 35, atk: 45, def: 160, spd: 70 }, moves: ['tackle','rockthrow','mudshot','rockslide'] },
   gyarados:   { name: 'Gyarados',   gen: 1, dex: 130, tier: 'strong',  types: ['water','flying'],
@@ -236,6 +283,7 @@ function makeMon(key, level) {
     maxhp, hp: maxhp,
     atk: statAt(s.base.atk, lvl), def: statAt(s.base.def, lvl), spd: statAt(s.base.spd, lvl),
     moves: s.moves.slice(),
+    status: null, sleepTurns: 0,
   };
 }
 
@@ -244,5 +292,6 @@ const PLAYABLE_KEYS = SPECIES_KEYS.filter((k) => SPECIES[k].tier !== 'boss');
 
 module.exports = {
   MOVES, SPECIES, TYPE_CHART, SPECIES_KEYS, PLAYABLE_KEYS, MAX_LEVEL,
-  typeEffect, makeMon, xpToNext, xpForWin,
+  STATUS, ITEMS, STARTING_BAG, STARTING_MONEY,
+  typeEffect, makeMon, xpToNext, xpForWin, moneyForWin,
 };

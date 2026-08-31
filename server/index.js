@@ -12,8 +12,8 @@ const { WebSocketServer } = require('ws');
 
 const map = require('./map');
 const {
-  SPECIES, MOVES, PLAYABLE_KEYS, MAX_LEVEL,
-  typeEffect, makeMon, xpToNext, xpForWin,
+  SPECIES, MOVES, PLAYABLE_KEYS, MAX_LEVEL, STATUS, ITEMS, STARTING_BAG, STARTING_MONEY,
+  typeEffect, makeMon, xpToNext, xpForWin, moneyForWin,
 } = require('./data');
 
 const PORT = process.env.PORT || 3000;
@@ -61,13 +61,84 @@ const tileTaken = (tx, ty, exceptId) =>
 // What the client needs to draw one side of the field.
 function monView(mon, full) {
   const v = { key: mon.key, name: mon.name, types: mon.types, dex: mon.dex, gen: mon.gen,
-              level: mon.level, hp: mon.hp, maxhp: mon.maxhp };
+              level: mon.level, hp: mon.hp, maxhp: mon.maxhp, status: mon.status };
   if (full) { v.atk = mon.atk; v.def = mon.def; v.spd = mon.spd; }
   return v;
 }
 function progress(p) {
   return { level: p.level, xp: p.xp, xpNext: xpToNext(p.level), species: p.species,
-           speciesName: SPECIES[p.species].name };
+           speciesName: SPECIES[p.species].name, money: p.money };
+}
+
+// The bag as the client wants it: one row per item type still held.
+function bagView(p) {
+  return Object.entries(p.bag || {}).map(([key, count]) => ({
+    key, count, name: ITEMS[key].name,
+    heal: ITEMS[key].heal || 0, cures: ITEMS[key].cures || [],
+  }));
+}
+
+// ---- status conditions ----
+// Paralysis halves speed and burn halves attack, so both show up in the maths
+// rather than only in the message log.
+const effSpeed = (m) => (m.status === 'par' ? Math.floor(m.spd / 2) : m.spd);
+const effAtk   = (m) => (m.status === 'brn' ? Math.floor(m.atk / 2) : m.atk);
+
+// A mon can only carry one status, and its typing can shrug some off entirely.
+function canCatchStatus(mon, key) {
+  return !mon.status && !STATUS[key].immune.some((t) => mon.types.includes(t));
+}
+function applyStatus(mon, key) {
+  mon.status = key;
+  if (key === 'slp') mon.sleepTurns = 1 + Math.floor(Math.random() * 3);
+}
+
+// Checked before a mon acts. Freeze and sleep can end here; paralysis just
+// sometimes eats the turn.
+function preMove(mon) {
+  if (mon.status === 'frz') {
+    if (Math.random() < 0.20) { mon.status = null; return { blocked: false, note: `${mon.name} thawed out!` }; }
+    return { blocked: true, note: `${mon.name} is frozen solid!` };
+  }
+  if (mon.status === 'slp') {
+    // Count down *after* losing the turn, so being put to sleep always costs at
+    // least one turn even when the roll came up 1.
+    if (mon.sleepTurns <= 0) { mon.status = null; return { blocked: false, note: `${mon.name} woke up!` }; }
+    mon.sleepTurns -= 1;
+    return { blocked: true, note: `${mon.name} is fast asleep.` };
+  }
+  if (mon.status === 'par' && Math.random() < 0.25)
+    return { blocked: true, note: `${mon.name} is paralysed! It can't move!` };
+  return { blocked: false, note: null };
+}
+
+// Burn and poison bite at the end of every round.
+function endOfTurn(mon) {
+  if (mon.status !== 'brn' && mon.status !== 'psn') return null;
+  const dmg = Math.max(1, Math.floor(mon.maxhp / 16));
+  mon.hp = Math.max(0, mon.hp - dmg);
+  return `${mon.name} is hurt by its ${mon.status === 'brn' ? 'burn' : 'poison'}! (-${dmg})`;
+}
+
+// Spending an item costs the turn. Returns the log line, or null if the item
+// would have done nothing (full HP, wrong cure) — the caller refunds the turn.
+function useItem(entity, mon, itemKey) {
+  const it = ITEMS[itemKey];
+  if (!it || !entity.bag || !entity.bag[itemKey]) return null;
+  let note;
+  if (it.heal) {
+    if (mon.hp >= mon.maxhp) return null;
+    const healed = Math.min(it.heal, mon.maxhp - mon.hp);
+    mon.hp += healed;
+    note = `${entity.name} used a ${it.name}. ${mon.name} recovered ${healed} HP!`;
+  } else {
+    if (!mon.status || !it.cures.includes(mon.status)) return null;
+    note = `${entity.name} used a ${it.name}. ${mon.name}'s ${STATUS[mon.status].name.toLowerCase()} cleared!`;
+    mon.status = null;
+  }
+  entity.bag[itemKey] -= 1;
+  if (entity.bag[itemKey] <= 0) delete entity.bag[itemKey];
+  return note;
 }
 
 // NPCs pick whatever hits hardest against what's actually in front of them —
@@ -77,7 +148,10 @@ function aiMove(mon, foe) {
   for (const key of mon.moves) {
     const mv = MOVES[key];
     const stab = mon.types.includes(mv.type) ? 1.5 : 1;
-    const score = mv.power * stab * typeEffect(mv.type, foe.types);
+    // a status move has no power, so score it by how likely it is to land
+    const score = mv.power
+      ? mv.power * stab * typeEffect(mv.type, foe.types)
+      : (mv.status && canCatchStatus(foe, mv.status) ? 70 * mv.chance : 0);
     if (score > bestScore) { bestScore = score; best = key; }
   }
   return best;
@@ -99,9 +173,11 @@ function startBattle(a, b) {
     const ws = entityWs(me.entity);
     if (ws) send(ws, {
       t: 'battleStart', battleId: id,
-      you: { name: me.entity.name, mon: monView(me.mon, true),
-             moves: me.mon.moves.map(m => ({ key: m, ...MOVES[m] })) },
-      foe: { name: foe.entity.name, line: foe.entity.line || '', mon: monView(foe.mon, false) },
+      you: { id: pid, name: me.entity.name, mon: monView(me.mon, true),
+             moves: me.mon.moves.map(m => ({ key: m, ...MOVES[m] })),
+             bag: bagView(me.entity) },
+      foe: { id: foe.entity.id, name: foe.entity.name, line: foe.entity.line || '',
+             mon: monView(foe.mon, false) },
     });
   }
   broadcast({ t: 'playerBattling', id: a.id, inBattle: true });
@@ -114,42 +190,88 @@ const PACE = 0.3;
 
 function damage(attacker, defender, moveKey) {
   const mv = MOVES[moveKey];
+  // a powerless move is a pure status move — it lands or it doesn't, no damage
+  if (!mv.power) return { dmg: 0, eff: 1, move: mv.name, type: mv.type, statusMove: true };
   const eff = typeEffect(mv.type, defender.types);
   const stab = attacker.types.includes(mv.type) ? 1.5 : 1;
   const rnd = 0.85 + Math.random() * 0.15;
-  const base = ((2 * attacker.level) / 5 + 2) * mv.power * (attacker.atk / defender.def) / 50 + 2;
+  const base = ((2 * attacker.level) / 5 + 2) * mv.power * (effAtk(attacker) / defender.def) / 50 + 2;
   const dmg = eff === 0 ? 0 : Math.max(1, Math.round(base * eff * stab * rnd * PACE));
   defender.hp = Math.max(0, defender.hp - dmg);
-  return { dmg, eff, move: mv.name, type: mv.type };
+  return { dmg, eff, move: mv.name, type: mv.type, statusMove: false };
 }
 
 function resolveBattle(battle) {
   const [id1, id2] = battle.order;
   const s1 = battle.sides[id1], s2 = battle.sides[id2];
-  // faster mon goes first; tie broken randomly
-  let first = id1, second = id2;
-  if (s2.mon.spd > s1.mon.spd || (s2.mon.spd === s1.mon.spd && Math.random() < 0.5)) {
-    first = id2; second = id1;
-  }
+
+  // Every log line carries the state it leaves behind, so the client can move
+  // the HP bars and status chips in step with the text.
+  const snapshot = () => Object.fromEntries(battle.order.map((pid) => {
+    const m = battle.sides[pid].mon;
+    return [pid, { hp: m.hp, status: m.status }];
+  }));
   const log = [];
+  const say = (text) => log.push({ text, state: snapshot() });
+
+  // Reaching into the bag happens before anyone swings; otherwise speed decides.
+  const rank = (side) => (side.choice.kind === 'item' ? 0 : 1);
+  let first = id1, second = id2;
+  const tie = effSpeed(s2.mon) > effSpeed(s1.mon) ||
+              (effSpeed(s2.mon) === effSpeed(s1.mon) && Math.random() < 0.5);
+  if (rank(s2) < rank(s1) || (rank(s2) === rank(s1) && tie)) { first = id2; second = id1; }
+
   for (const pid of [first, second]) {
     const me = battle.sides[pid];
-    const foe = battle.sides[battle.order.find(o => o !== pid)];
+    const foe = battle.sides[battle.order.find((o) => o !== pid)];
     if (me.mon.hp <= 0) continue;                 // fainted before acting
-    const r = damage(me.mon, foe.mon, me.choice);
-    log.push({ by: pid, byName: me.mon.name, target: foe.entity.id, targetName: foe.mon.name,
-               move: r.move, dmg: r.dmg, eff: r.eff, foeHp: foe.mon.hp, foeMax: foe.mon.maxhp });
+
+    if (me.choice.kind === 'item') {
+      const note = useItem(me.entity, me.mon, me.choice.item);
+      say(note || `${me.entity.name} rummaged in the bag, but it did nothing.`);
+      continue;
+    }
+
+    const pre = preMove(me.mon);
+    if (pre.note) say(pre.note);
+    if (pre.blocked) continue;
+
+    const r = damage(me.mon, foe.mon, me.choice.move);
+    const effTxt = r.statusMove ? ''
+      : r.eff === 0 ? " It doesn't affect the target…"
+      : r.eff > 1 ? " It's super effective!"
+      : r.eff < 1 ? " It's not very effective…" : '';
+    say(`${me.mon.name} used ${r.move}!${r.statusMove ? '' : ` (-${r.dmg})`}${effTxt}`);
+
+    const mv = MOVES[me.choice.move];
+    if (mv.status && r.eff !== 0 && Math.random() < mv.chance && canCatchStatus(foe.mon, mv.status)) {
+      applyStatus(foe.mon, mv.status);
+      say(`${foe.mon.name} ${STATUS[mv.status].onset}`);
+    } else if (r.statusMove) {
+      say(foe.mon.status
+        ? `${foe.mon.name} is already ${STATUS[foe.mon.status].is}.`
+        : `${foe.mon.name} shook it off.`);
+    }
   }
-  // reset choices
+
+  // burn / poison chip, once both sides have acted
+  for (const pid of [first, second]) {
+    const me = battle.sides[pid];
+    if (me.mon.hp <= 0) continue;
+    const note = endOfTurn(me.mon);
+    if (note) say(note);
+  }
+
   s1.choice = null; s2.choice = null;
   const faintedId = s1.mon.hp <= 0 ? id1 : (s2.mon.hp <= 0 ? id2 : null);
 
   for (const pid of battle.order) {
     const me = battle.sides[pid];
-    const foe = battle.sides[battle.order.find(o => o !== pid)];
+    const foe = battle.sides[battle.order.find((o) => o !== pid)];
     const ws = entityWs(me.entity);
     if (ws) send(ws, { t: 'battleTurn', log, youHp: me.mon.hp, youMax: me.mon.maxhp,
-                       foeHp: foe.mon.hp, foeMax: foe.mon.maxhp });
+                       youStatus: me.mon.status, foeHp: foe.mon.hp, foeMax: foe.mon.maxhp,
+                       foeStatus: foe.mon.status, bag: bagView(me.entity) });
   }
   if (faintedId !== null) endBattle(battle, faintedId);
 }
@@ -159,7 +281,9 @@ function resolveBattle(battle) {
 function awardXp(winner, loserLevel) {
   if (winner.isNPC) return null;
   const gained = xpForWin(loserLevel);
+  const cash = moneyForWin(loserLevel);
   winner.xp += gained;
+  winner.money += cash;
   const levels = [];
   while (winner.level < MAX_LEVEL && winner.xp >= xpToNext(winner.level)) {
     winner.xp -= xpToNext(winner.level);
@@ -167,7 +291,7 @@ function awardXp(winner, loserLevel) {
     levels.push(winner.level);
   }
   if (winner.level >= MAX_LEVEL) winner.xp = 0;
-  return { gained, levels };
+  return { gained, levels, cash };
 }
 
 function endBattle(battle, loserId) {
@@ -183,6 +307,7 @@ function endBattle(battle, loserId) {
     if (ws) send(ws, {
       t: 'battleEnd', win: won, youMon: me.mon.name, result: won ? 'won' : 'lost',
       xp: won && reward ? reward.gained : 0,
+      money: won && reward ? reward.cash : 0,
       levelUps: won && reward ? reward.levels : [],
       you: progress(me.entity),
     });
@@ -202,13 +327,28 @@ function forfeit(playerId) {
   if (battle) endBattle(battle, playerId);
 }
 
+// ---- the mart ----
+// The shop is wherever the map draws an 'M'; standing next to any of its three
+// tiles is close enough to be served.
+const MART_TILES = new Set();
+for (let y = 0; y < map.H; y++)
+  for (let x = 0; x < map.W; x++)
+    if (map.OBJECTS[y][x] === 'M')
+      for (let dx = 0; dx < 3; dx++) MART_TILES.add(`${x + dx},${y}`);
+const atShop = (p) => [[0, 1], [0, -1], [1, 0], [-1, 0]]
+  .some(([dx, dy]) => MART_TILES.has(`${p.x + dx},${p.y + dy}`));
+const CATALOGUE = Object.entries(ITEMS).map(([key, it]) => ({
+  key, name: it.name, price: it.price, heal: it.heal || 0, cures: it.cures || [],
+}));
+
 // ---- connection handling ----
 wss.on('connection', (ws) => {
   const id = nextId++;
   const spawn = map.randomSpawn();
   const p = { id, name: 'TrainerJD', charId: (id - 1) % NUM_CHARS,
               x: spawn.x, y: spawn.y, dir: 'down', ws, battleId: null, line: '',
-              species: randPlayable(), level: START_LEVEL, xp: 0 };
+              species: randPlayable(), level: START_LEVEL, xp: 0,
+              bag: { ...STARTING_BAG }, money: STARTING_MONEY };
   players.set(id, p);
 
   send(ws, {
@@ -225,6 +365,20 @@ wss.on('connection', (ws) => {
     let msg; try { msg = JSON.parse(raw); } catch { return; }
     const me = players.get(id);
     if (!me) return;
+    const side = (pid) => { const b = battles.get(me.battleId); return b && b.sides[pid]; };
+    // Lock in this turn's choice; NPCs answer straight away so solo fights resolve.
+    const commit = (pid, choice, sock) => {
+      const battle = battles.get(me.battleId);
+      if (!battle) return;
+      battle.sides[pid].choice = choice;
+      for (const other of battle.order) {
+        const sd = battle.sides[other];
+        const foe = battle.sides[battle.order.find((o) => o !== other)];
+        if (!sd.choice && sd.entity.isNPC) sd.choice = { kind: 'move', move: aiMove(sd.mon, foe.mon) };
+      }
+      if (battle.order.every((o) => battle.sides[o].choice)) resolveBattle(battle);
+      else send(sock, { t: 'battleWait' });
+    };
 
     if (msg.t === 'setName' && typeof msg.name === 'string') {
       me.name = msg.name.slice(0, 16).replace(/[^\w \-]/g, '') || me.name;
@@ -276,21 +430,36 @@ wss.on('connection', (ws) => {
     }
 
     if (msg.t === 'battleMove' && me.battleId) {
-      const battle = battles.get(me.battleId);
-      if (!battle) return;
-      const side = battle.sides[id];
-      if (!side || side.choice) return;
-      if (!side.mon.moves.includes(msg.move)) return;
-      side.choice = msg.move;
-      // NPC opponents pick automatically so solo battles resolve immediately
-      for (const pid of battle.order) {
-        const s = battle.sides[pid];
-        const foe = battle.sides[battle.order.find(o => o !== pid)];
-        if (!s.choice && s.entity.isNPC) s.choice = aiMove(s.mon, foe.mon);
-      }
-      const both = battle.order.every(pid => battle.sides[pid].choice);
-      if (both) resolveBattle(battle);
-      else send(ws, { t: 'battleWait' });         // waiting for foe
+      if (!side(id) || side(id).choice) return;
+      if (!side(id).mon.moves.includes(msg.move)) return;
+      commit(id, { kind: 'move', move: msg.move }, ws);
+      return;
+    }
+
+    if (msg.t === 'battleItem' && me.battleId) {
+      if (!side(id) || side(id).choice) return;
+      if (!ITEMS[msg.item] || !me.bag[msg.item]) return;
+      commit(id, { kind: 'item', item: msg.item }, ws);
+      return;
+    }
+
+    // ---- the mart ----
+    if (msg.t === 'shopOpen') {
+      if (me.battleId || !atShop(me)) return;
+      send(ws, { t: 'shop', catalogue: CATALOGUE, money: me.money, bag: bagView(me) });
+      return;
+    }
+
+    if (msg.t === 'buy' && typeof msg.item === 'string') {
+      if (me.battleId || !atShop(me)) return;
+      const it = ITEMS[msg.item];
+      if (!it) return;
+      if (me.money < it.price) { send(ws, { t: 'shopUpdate', money: me.money, bag: bagView(me),
+                                            note: "You can't afford that." }); return; }
+      me.money -= it.price;
+      me.bag[msg.item] = (me.bag[msg.item] || 0) + 1;
+      send(ws, { t: 'shopUpdate', money: me.money, bag: bagView(me), note: `Bought one ${it.name}.` });
+      send(ws, { t: 'progress', you: progress(me) });
       return;
     }
 
@@ -333,7 +502,22 @@ const NPC_DEFS = [
     line: "Ice and dragon. Nothing you have beats both." },
   { name: 'Beekeeper',       level: 52, species: 'roaringmoon', charId: 18, x: 24, y: 3,
     line: "Seen a Combee round here? No? ...Figures. My Roaring Moon ate the hive." },
+
+  // ---- the mountain pass (rows 22-43) ----
+  // The ladder continues underground. Free slots, all checked walkable:
+  //   west chamber  (4,30) (9,32)   east chamber  (18,29) (23,32)
+  //   deep chamber  (6,37) (21,37) (9,40) (14,42)
+  { name: 'Miner Cato',      level: 16, species: 'onix',         charId: 0,  x: 9,  y: 24,
+    line: "Been swinging a pick down here since sun-up. Arms like rope." },
+  { name: 'Hiker Solvi',     level: 19, species: 'machamp',      charId: 5,  x: 18, y: 25,
+    line: "These tunnels build shoulders. Want to see?" },
 ];
+
+// Catch a typo'd coordinate the moment the server boots, rather than leaving a
+// trainer standing inside a rock where nobody can reach them.
+for (const d of NPC_DEFS) {
+  if (map.isBlocked(d.x, d.y)) console.warn(`  ! ${d.name} is standing on a blocked tile (${d.x},${d.y})`);
+}
 NPC_DEFS.forEach((d, i) => {
   const id = 10001 + i;
   npcs.set(id, { id, name: d.name, line: d.line, charId: d.charId, species: d.species,
@@ -360,6 +544,7 @@ setInterval(() => {
 
 server.listen(PORT, () => {
   console.log(`\n  Pokémon Twister Version running:  http://localhost:${PORT}`);
+  const levels = NPC_DEFS.map(d => d.level);
   console.log(`  ${Object.keys(SPECIES).length} species · ${npcs.size} trainers, Lv ` +
-              `${NPC_DEFS[0].level}–${NPC_DEFS[NPC_DEFS.length - 1].level}\n`);
+              `${Math.min(...levels)}–${Math.max(...levels)}\n`);
 });

@@ -13,7 +13,10 @@ const ui = {
   setProgress(p) {
     document.getElementById('prog').textContent =
       `${p.speciesName} Lv${p.level} · ${p.xp}/${p.xpNext} XP`;
+    if (p.money !== undefined) ui.setMoney(p.money);
   },
+  setMoney(n) { document.getElementById('money').textContent = `₽${n}`; },
+  shopOpen: false,
   // Fills the partner dropdown from /api/species; boss mons are NPC-only.
   buildPartnerPicker(list) {
     const sel = document.getElementById('partnerSelect');
@@ -95,6 +98,47 @@ window.addEventListener('keydown', (e) => {
     e.preventDefault();
     chatInput.focus();
   }
+});
+
+// ---------- the mart ----------
+const shopOverlay = document.getElementById('shopOverlay');
+const shopList = document.getElementById('shopList');
+const shopNote = document.getElementById('shopNote');
+
+function renderShop(catalogue, money, bag) {
+  document.getElementById('shopMoney').textContent = `₽${money}`;
+  const held = Object.fromEntries(bag.map((b) => [b.key, b.count]));
+  shopList.innerHTML = '';
+  catalogue.forEach((it) => {
+    const what = it.heal ? `+${it.heal} HP` : `cures ${it.cures.map((c) => c.toUpperCase()).join('/')}`;
+    const row = document.createElement('div');
+    row.className = 'shopRow' + (money < it.price ? ' broke' : '');
+    row.innerHTML = `<span class="n">${escapeHtml(it.name)}</span>` +
+      `<span class="e">${escapeHtml(what)}</span>` +
+      `<span class="h">${held[it.key] ? 'x' + held[it.key] : ''}</span>` +
+      `<span class="p">₽${it.price}</span>`;
+    row.addEventListener('click', () => window.net.send({ t: 'buy', item: it.key }));
+    shopList.appendChild(row);
+  });
+}
+function closeShop() {
+  shopOverlay.classList.add('hidden');
+  ui.shopOpen = false;
+  shopNote.textContent = '';
+}
+document.getElementById('shopClose').addEventListener('click', closeShop);
+window.addEventListener('keydown', (e) => { if (ui.shopOpen && e.key === 'Escape') closeShop(); });
+
+window.net.on('shop', (m) => {
+  ui.shopOpen = true;
+  ui.lastCatalogue = m.catalogue;
+  shopOverlay.classList.remove('hidden');
+  renderShop(m.catalogue, m.money, m.bag);
+});
+window.net.on('shopUpdate', (m) => {
+  renderShop(ui.lastCatalogue || [], m.money, m.bag);
+  ui.setMoney(m.money);
+  shopNote.textContent = m.note || '';
 });
 
 // Keep the init packet if it arrives before Boot is ready.

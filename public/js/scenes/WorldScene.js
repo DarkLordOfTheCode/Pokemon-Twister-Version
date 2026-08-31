@@ -30,6 +30,11 @@ class WorldScene extends Phaser.Scene {
     this.cameras.main.startFollow(this.player, true, 0.15, 0.15);
     this.cameras.main.setBackgroundColor('#0e1220');
 
+    this.space = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE);
+    this.space.on('down', () => {
+      if (this.inBattle || window.ui.chatFocused || window.ui.shopOpen || !window.ui.entered) return;
+      window.net.send({ t: 'shopOpen' });          // the server checks we're actually there
+    });
     this.cursors = this.input.keyboard.createCursorKeys();
     this.wasd = this.input.keyboard.addKeys({ up: 'W', down: 'S', left: 'A', right: 'D' });
     // Don't let Phaser preventDefault WASD/arrows — otherwise you can't type those
@@ -44,13 +49,14 @@ class WorldScene extends Phaser.Scene {
   // ---------- map ----------
   buildMap() {
     const T = this.T;
-    const groundKey = (c) => ({ G: 'grass', F: 'grassflower', D: 'dirt', L: 'floor', W: 'water' }[c] || 'grass');
+    const groundKey = (c) => ({ G: 'grass', F: 'grassflower', D: 'dirt', L: 'floor', W: 'water',
+                                S: 'stone', P: 'rubble' }[c] || 'grass');
     for (let y = 0; y < this.mapH; y++) {
       for (let x = 0; x < this.mapW; x++) {
         this.add.image(x * T, y * T, groundKey(this.ground[y][x])).setOrigin(0, 0).setDepth(0);
       }
     }
-    // object layer (trees / mart) — drawn with bottom-anchored origin so they rise above the tile
+    // object layer (trees / mart / rocks) — drawn with bottom-anchored origin so they rise above the tile
     for (let y = 0; y < this.mapH; y++) {
       for (let x = 0; x < this.mapW; x++) {
         const o = this.objects[y][x];
@@ -60,6 +66,9 @@ class WorldScene extends Phaser.Scene {
         } else if (o === 'M') {
           this.add.image(x * T, y * T + T, 'mart')
             .setOrigin(0, 1).setDepth(y * T + T);
+        } else if (o === 'R') {
+          this.add.image(x * T + T / 2, y * T + T, 'rock')
+            .setOrigin(0.5, 1).setDepth(y * T + T);
         }
       }
     }
@@ -100,7 +109,7 @@ class WorldScene extends Phaser.Scene {
 
   // ---------- input / movement ----------
   update() {
-    if (this.moving || this.inBattle || window.ui.chatFocused || !window.ui.entered) return;
+    if (this.moving || this.inBattle || window.ui.chatFocused || window.ui.shopOpen || !window.ui.entered) return;
     let dx = 0, dy = 0, dir = this.me.dir;
     if (this.cursors.left.isDown || this.wasd.left.isDown)  { dx = -1; dir = 'left'; }
     else if (this.cursors.right.isDown || this.wasd.right.isDown) { dx = 1; dir = 'right'; }
@@ -142,7 +151,7 @@ class WorldScene extends Phaser.Scene {
     if (x < 0 || y < 0 || x >= this.mapW || y >= this.mapH) return true;
     if (this.ground[y][x] === 'W') return true;
     const o = this.objects[y][x];
-    if (o === 'T') return true;
+    if (o === 'T' || o === 'R') return true;
     // mart footprint: this tile or up to 2 tiles to the left is an 'M'
     for (let dx = 0; dx <= 2; dx++) if (this.objects[y][x - dx] === 'M' && x - dx >= 0) return true;
     return false;

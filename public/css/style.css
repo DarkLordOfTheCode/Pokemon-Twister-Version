@@ -83,3 +83,30 @@ html, body {
 }
 .panel button:hover { filter: brightness(1.1); }
 .panel button:active { transform: translateY(1px); }
+
+/* Money readout */
+#money { color: #7ee787; font-weight: bold; }
+
+/* Poké Mart */
+#shopOverlay {
+  position: absolute; inset: 0; display: grid; place-items: center;
+  background: rgba(11,15,28,.78);
+  pointer-events: auto; z-index: 5;
+}
+#shopOverlay.hidden { display: none; }
+#shopOverlay .panel { padding: 22px 26px; min-width: 340px; }
+#shopOverlay h2 { font-size: 18px; margin-bottom: 4px; }
+#shopMoney { color: #7ee787; font-weight: bold; font-size: 13px; margin-bottom: 12px; }
+#shopList { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
+.shopRow {
+  display: grid; grid-template-columns: 1fr auto 34px 56px; gap: 8px; align-items: center;
+  background: #1b2440; border: 2px solid #2c3550; border-radius: 8px;
+  padding: 6px 10px; font-size: 12px; text-align: left; cursor: pointer;
+}
+.shopRow:hover { border-color: var(--accent2); background: #223057; }
+.shopRow.broke { opacity: .45; cursor: not-allowed; }
+.shopRow .n { color: #f6f4ec; }
+.shopRow .e { color: #9aa4bf; font-size: 10px; }
+.shopRow .h { color: #ffd866; font-size: 11px; text-align: right; }
+.shopRow .p { color: #7ee787; font-weight: bold; text-align: right; }
+#shopNote { color: #ffd866; font-size: 11px; min-height: 15px; margin-bottom: 10px; }

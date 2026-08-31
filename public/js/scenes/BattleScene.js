@@ -7,14 +7,20 @@ const TYPE_COLOR = {
   steel: 0xb8b8d0, fairy: 0xee99ac,
 };
 
+// Status chips, in the same flat palette as the type chips.
+const STATUS_COLOR = { par: 0xf8d030, frz: 0x98d8d8, brn: 0xf08030, psn: 0xa040a0, slp: 0x9aa4bf };
+const STATUS_TAG   = { par: 'PAR', frz: 'FRZ', brn: 'BRN', psn: 'PSN', slp: 'SLP' };
+
 class BattleScene extends Phaser.Scene {
   constructor() { super('Battle'); }
 
   create(data) {
-    this.you = data.you;      // { name, mon, moves:[{key,name,type,power}] }
-    this.foe = data.foe;      // { name, line, mon }
+    this.you = data.you;      // { id, name, mon, moves:[...], bag:[...] }
+    this.foe = data.foe;      // { id, name, line, mon }
+    this.bag = data.you.bag || [];
     this.busy = false;
     this.ended = false;
+    this.bagOpen = false;
 
     const W = this.scale.width, H = this.scale.height;
 
@@ -71,16 +77,21 @@ class BattleScene extends Phaser.Scene {
     this.add.rectangle(x, y, w, h, 0xf6f4ec).setOrigin(0).setStrokeStyle(2, 0x1b2233);
     this.add.text(x + 8, y + 4, mon.name, { fontFamily: 'monospace', fontSize: 11,
       color: '#1b2233', fontStyle: 'bold' });
-    this.add.text(x + w - 8, y + 5, `Lv${mon.level}`, { fontFamily: 'monospace', fontSize: 10,
+    this.add.text(x + w - 38, y + 5, `Lv${mon.level}`, { fontFamily: 'monospace', fontSize: 10,
       color: '#1b2233', fontStyle: 'bold' }).setOrigin(1, 0);
     this.drawTypeChips(mon.types, x + 8, y + 19);
     // hp bar, with your own exact HP tucked into the gap beside the type chips
     this.add.rectangle(x + 8, y + 31, w - 16, 6, 0x555555).setOrigin(0);
     const fill = this.add.rectangle(x + 8, y + 31, w - 16, 6, 0x7ee787).setOrigin(0);
-    const box = { fill, w: w - 16, max: mon.maxhp, hp: mon.hp,
+    // status chip — hidden until something sticks
+    const chipBg = this.add.rectangle(x + w - 8, y + 4, 26, 10, 0x888888).setOrigin(1, 0).setVisible(false);
+    const chipTx = this.add.text(x + w - 21, y + 5, '', { fontFamily: 'monospace', fontSize: 7,
+      color: '#0e1220', fontStyle: 'bold' }).setOrigin(0.5, 0).setVisible(false);
+    const box = { fill, w: w - 16, max: mon.maxhp, hp: mon.hp, chipBg, chipTx,
                   txt: isYou ? this.add.text(x + w - 8, y + 19, `${mon.hp}/${mon.maxhp}`,
                     { fontFamily: 'monospace', fontSize: 9, color: '#1b2233' }).setOrigin(1, 0) : null };
     this.setHP(box, mon.hp);
+    this.setStatus(box, mon.status);
     return box;
   }
 
@@ -94,6 +105,14 @@ class BattleScene extends Phaser.Scene {
         color: '#0e1220', fontStyle: 'bold' });
       cx += w + 3;
     });
+  }
+
+  setStatus(box, status) {
+    const on = !!status && !!STATUS_TAG[status];
+    box.chipBg.setVisible(on); box.chipTx.setVisible(on);
+    if (!on) return;
+    box.chipBg.fillColor = STATUS_COLOR[status];
+    box.chipTx.setText(STATUS_TAG[status]);
   }
 
   setHP(box, hp) {
@@ -123,16 +142,66 @@ class BattleScene extends Phaser.Scene {
       rect.on('pointerdown', () => this.chooseMove(mv.key));
       this.moveButtons.push({ rect, label });
     });
-    // flee
+    // bag, then flee, stacked down the left
     const fx = 14, fy = y0;
-    const flee = this.add.rectangle(fx, fy, 96, bh, 0x3a2030).setOrigin(0)
+    const bagBtn = this.add.rectangle(fx, fy, 96, bh, 0x2c3550).setOrigin(0)
+      .setStrokeStyle(2, 0xffd866).setInteractive({ useHandCursor: true });
+    this.add.text(fx + 28, fy + 6, 'Bag', { fontFamily: 'monospace', fontSize: 10, color: '#ffd866' });
+    bagBtn.on('pointerdown', () => this.toggleBag());
+
+    const flee = this.add.rectangle(fx, fy + bh + gy, 96, bh, 0x3a2030).setOrigin(0)
       .setStrokeStyle(2, 0xe3350d).setInteractive({ useHandCursor: true });
-    this.add.text(fx + 30, fy + 6, 'Run', { fontFamily: 'monospace', fontSize: 10, color: '#ff9d9d' });
+    this.add.text(fx + 30, fy + bh + gy + 6, 'Run', { fontFamily: 'monospace', fontSize: 10, color: '#ff9d9d' });
     flee.on('pointerdown', () => { if (!this.ended) window.net.send({ t: 'battleFlee' }); });
+  }
+
+  // The bag slides over the battlefield: one row per item type still held.
+  toggleBag() {
+    if (this.busy || this.ended) return;
+    if (this.bagOpen) return this.closeBag();
+    const W = this.scale.width, H = this.scale.height;
+    const rows = this.bag.length;
+    const panelH = Math.max(46, 22 + rows * 18);
+    this.bagUI = [];
+    this.bagUI.push(this.add.rectangle(W / 2, H * 0.30, W * 0.72, panelH, 0x0e1220, 0.97)
+      .setStrokeStyle(2, 0xffd866).setDepth(50));
+    const top = H * 0.30 - panelH / 2;
+    this.bagUI.push(this.add.text(W / 2, top + 5, rows ? 'BAG — pick one (costs your turn)' : 'Your bag is empty.',
+      { fontFamily: 'monospace', fontSize: 9, color: '#ffd866' }).setOrigin(0.5, 0).setDepth(51));
+    this.bag.forEach((it, i) => {
+      const ry = top + 20 + i * 18;
+      const what = it.heal ? `+${it.heal} HP` : `cures ${it.cures.map((c) => c.toUpperCase()).join('/')}`;
+      const row = this.add.rectangle(W / 2, ry, W * 0.66, 16, 0x2c3550).setOrigin(0.5, 0)
+        .setStrokeStyle(1, 0x3b5ca8).setInteractive({ useHandCursor: true }).setDepth(51);
+      const label = this.add.text(W / 2 - W * 0.31, ry + 3, `${it.name} x${it.count}`,
+        { fontFamily: 'monospace', fontSize: 9, color: '#f6f4ec' }).setDepth(52);
+      const eff = this.add.text(W / 2 + W * 0.31, ry + 3, what,
+        { fontFamily: 'monospace', fontSize: 8, color: '#9aa4bf' }).setOrigin(1, 0).setDepth(52);
+      row.on('pointerover', () => row.setFillStyle(0x3b5ca8));
+      row.on('pointerout', () => row.setFillStyle(0x2c3550));
+      row.on('pointerdown', () => this.chooseItem(it.key));
+      this.bagUI.push(row, label, eff);
+    });
+    this.bagOpen = true;
+  }
+  closeBag() {
+    (this.bagUI || []).forEach((o) => o.destroy());
+    this.bagUI = [];
+    this.bagOpen = false;
+  }
+
+  chooseItem(key) {
+    if (this.busy || this.ended) return;
+    this.closeBag();
+    this.busy = true;
+    this.setButtons(false);
+    this.msg.setText('Waiting for the other trainer…');
+    window.net.send({ t: 'battleItem', item: key });
   }
 
   chooseMove(key) {
     if (this.busy || this.ended) return;
+    this.closeBag();
     this.busy = true;
     this.setButtons(false);
     this.msg.setText('Waiting for the other trainer…');
@@ -159,22 +228,27 @@ class BattleScene extends Phaser.Scene {
   }
 
   playTurn(m) {
-    // sequentially reveal each attack in the log, then refresh both HP bars
-    const lines = m.log.map((e) => {
-      const effTxt = e.eff === 0 ? " It doesn't affect the target…"
-        : e.eff > 1 ? " It's super effective!"
-        : e.eff < 1 ? " It's not very effective…" : '';
-      return `${e.byName} used ${e.move}! (-${e.dmg})${effTxt}`;
-    });
+    // Each log line carries the state it leaves behind, so the bars and chips
+    // move in step with the text rather than all snapping at the end.
+    if (m.bag) this.bag = m.bag;
     let i = 0;
+    const apply = (state) => {
+      if (!state) return;
+      const mine = state[this.you.id], theirs = state[this.foe.id];
+      if (mine)   { this.setHP(this.youBox, mine.hp);  this.setStatus(this.youBox, mine.status); }
+      if (theirs) { this.setHP(this.foeBox, theirs.hp); this.setStatus(this.foeBox, theirs.status); }
+    };
     const step = () => {
-      if (i < lines.length) {
-        this.msg.setText(lines[i]); i++;
+      const e = m.log[i];
+      if (e) {
+        this.msg.setText(e.text);
+        apply(e.state);
         this.flash(this.youBody); this.flash(this.foeBody);
+        i++;
         this.time.delayedCall(750, step);
       } else {
-        this.setHP(this.youBox, m.youHp);
-        this.setHP(this.foeBox, m.foeHp);
+        this.setHP(this.youBox, m.youHp);   this.setStatus(this.youBox, m.youStatus);
+        this.setHP(this.foeBox, m.foeHp);   this.setStatus(this.foeBox, m.foeStatus);
         if (!this.ended) {
           this.busy = false; this.setButtons(true);
           this.msg.setText('Choose your move.');
@@ -195,7 +269,8 @@ class BattleScene extends Phaser.Scene {
     const W = this.scale.width, H = this.scale.height;
     const banner = m.win ? 'You won the battle!' : 'You lost the battle…';
     const tail = m.win && m.xp
-      ? `  +${m.xp} XP` + (m.levelUps.length ? `  ·  ${this.you.mon.name} grew to Lv${m.levelUps[m.levelUps.length - 1]}!` : '')
+      ? `  +${m.xp} XP` + (m.money ? `  ·  ₽${m.money}` : '')
+        + (m.levelUps.length ? `  ·  ${this.you.mon.name} grew to Lv${m.levelUps[m.levelUps.length - 1]}!` : '')
       : '';
     this.msg.setText(banner + tail);
     this.add.rectangle(W / 2, H / 2, W * 0.78, m.win && m.xp ? 62 : 50, 0x0e1220, 0.92)
@@ -204,8 +279,8 @@ class BattleScene extends Phaser.Scene {
       fontSize: 14, color: m.win ? '#7ee787' : '#ff7b72', fontStyle: 'bold' }).setOrigin(0.5);
     if (m.win && m.xp) {
       const gained = m.levelUps.length
-        ? `+${m.xp} XP — level up! Lv${m.levelUps[m.levelUps.length - 1]}`
-        : `+${m.xp} XP  (${m.you.xp}/${m.you.xpNext} to Lv${m.you.level + 1})`;
+        ? `+${m.xp} XP, ₽${m.money} — level up! Lv${m.levelUps[m.levelUps.length - 1]}`
+        : `+${m.xp} XP, ₽${m.money}  (${m.you.xp}/${m.you.xpNext} to Lv${m.you.level + 1})`;
       this.add.text(W / 2, H / 2 + 12, gained, { fontFamily: 'monospace', fontSize: 10,
         color: '#ffd866' }).setOrigin(0.5);
     }

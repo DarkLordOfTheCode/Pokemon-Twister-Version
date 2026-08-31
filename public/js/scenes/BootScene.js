@@ -8,8 +8,11 @@ class BootScene extends Phaser.Scene {
     this.load.image('dirt',        '/assets/tiles/dirt.png');
     this.load.image('water',       '/assets/tiles/water.png');
     this.load.image('floor',       '/assets/tiles/floor.png');
+    this.load.image('stone',       '/assets/tiles/stone.png');
+    this.load.image('rubble',      '/assets/tiles/rubble.png');
     this.load.image('tree',   '/assets/objects/tree.png');
     this.load.image('mart',   '/assets/objects/mart.png');
+    this.load.image('rock',   '/assets/objects/rock.png');
     for (let i = 0; i < 19; i++) {
       const id = String(i).padStart(2, '0');
       this.load.image(`char_${id}`, `/assets/chars/char_${id}.png`);
