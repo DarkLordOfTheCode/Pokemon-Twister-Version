@@ -17,7 +17,8 @@ const ui = {
   },
   setMoney(n) { document.getElementById('money').textContent = `₽${n}`; },
   shopOpen: false,
-  // Fills the partner dropdown from /api/species; boss mons are NPC-only.
+  // Fills the starter dropdown from /api/species. Only the six 'starter' mons
+  // are choosable — everything else is an NPC's or lives in the grass.
   buildPartnerPicker(list) {
     const sel = document.getElementById('partnerSelect');
     if (!sel || sel.dataset.built) return;
@@ -25,7 +26,7 @@ const ui = {
     for (const gen of [1, 9]) {
       const group = document.createElement('optgroup');
       group.label = `Gen ${gen}`;
-      list.filter((s) => s.gen === gen && s.tier !== 'boss')
+      list.filter((s) => s.gen === gen && s.tier === 'starter')
           .sort((a, b) => a.dex - b.dex)
           .forEach((s) => {
             const opt = document.createElement('option');
@@ -93,7 +94,7 @@ chatInput.addEventListener('keydown', (e) => {
 });
 // Enter (when playing) focuses chat
 window.addEventListener('keydown', (e) => {
-  if (!ui.entered) return;
+  if (!ui.entered || ui.dialogOpen) return;      // Enter advances dialogue instead
   if (e.key === 'Enter' && document.activeElement !== chatInput) {
     e.preventDefault();
     chatInput.focus();
@@ -143,6 +144,79 @@ window.net.on('shopUpdate', (m) => {
 
 // Keep the init packet if it arrives before Boot is ready.
 window.net.on('init', (m) => { window.__initMsg = m; });
+
+// ---------- debug panel ----------
+// The server decides whether this exists at all: it only sets init.debug when it
+// was started with TWISTER_DEV=1, and it ignores debug messages otherwise.
+const debugPanel = document.getElementById('debugPanel');
+const dbgLevel = document.getElementById('dbgLevel');
+ui.debugOn = false;
+
+ui.enableDebug = function () {
+  ui.debugOn = true;
+  debugPanel.classList.remove('hidden');
+};
+// Live tile readout, so map coordinates don't have to be counted by hand.
+ui.setPos = function (x, y, tile) {
+  if (ui.debugOn) document.getElementById('dbgPos').textContent = `${x},${y} ${tile}`;
+};
+
+debugPanel.addEventListener('click', (e) => {
+  const btn = e.target.closest('button');
+  if (!btn) return;
+  if (btn.dataset.warp) { window.net.send({ t: 'debug', action: 'warp', value: btn.dataset.warp }); return; }
+  const action = btn.dataset.dbg;
+  if (!action) return;
+  const value = action === 'level' ? +dbgLevel.value : action === 'money' ? 5000 : 0;
+  window.net.send({ t: 'debug', action, value });
+});
+// Typing a level must not also walk the player around.
+dbgLevel.addEventListener('focus', () => { ui.chatFocused = true; });
+dbgLevel.addEventListener('blur', () => { ui.chatFocused = false; });
+dbgLevel.addEventListener('keydown', (e) => e.stopPropagation());
+
+window.addEventListener('keydown', (e) => {
+  if (e.key !== '`' || !ui.debugOn || ui.chatFocused) return;
+  e.preventDefault();
+  debugPanel.classList.toggle('hidden');
+});
+
+// ---------- dialogue / cutscenes ----------
+// One queue of lines, advanced by Space, Enter or a click. While it's open the
+// world scene stops reading movement keys (see ui.dialogOpen).
+const dlgOverlay = document.getElementById('dialogueOverlay');
+const dlgBox = dlgOverlay.querySelector('.dlgBox');
+const dlgName = document.getElementById('dlgName');
+const dlgText = document.getElementById('dlgText');
+let dlgQueue = [], dlgDone = null;
+
+ui.dialogOpen = false;
+ui.showLines = function (name, lines, opts) {
+  dlgQueue = (lines || []).slice();
+  dlgDone = (opts && opts.onDone) || null;
+  ui.dialogOpen = true;
+  dlgBox.classList.toggle('dead', !!(opts && opts.dead));
+  dlgOverlay.classList.remove('hidden');
+  document.getElementById('chat').style.display = 'none';   // clear the box
+  dlgName.textContent = name || '';
+  advanceDialogue();
+};
+function advanceDialogue() {
+  if (!dlgQueue.length) {
+    dlgOverlay.classList.add('hidden');
+    document.getElementById('chat').style.display = '';
+    ui.dialogOpen = false;
+    const done = dlgDone; dlgDone = null;
+    if (done) done();
+    return;
+  }
+  dlgText.textContent = dlgQueue.shift();
+}
+dlgOverlay.addEventListener('click', advanceDialogue);
+window.addEventListener('keydown', (e) => {
+  if (!ui.dialogOpen || ui.chatFocused) return;
+  if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); advanceDialogue(); }
+});
 
 // ---------- Phaser ----------
 const config = {

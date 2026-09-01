@@ -13,10 +13,13 @@ const { WebSocketServer } = require('ws');
 const map = require('./map');
 const {
   SPECIES, MOVES, PLAYABLE_KEYS, MAX_LEVEL, STATUS, ITEMS, STARTING_BAG, STARTING_MONEY,
+  DESERT_LEVEL, WILD_POOL, ENCOUNTER_CHANCE, wildLevel,
   typeEffect, makeMon, xpToNext, xpForWin, moneyForWin,
 } = require('./data');
 
 const PORT = process.env.PORT || 3000;
+// Debug tools are off unless the server was started with TWISTER_DEV=1.
+const DEBUG = !!process.env.TWISTER_DEV;
 const app = express();
 app.use(express.static(path.join(__dirname, '..', 'public')));
 app.use('/vendor', express.static(path.join(__dirname, '..', 'node_modules', 'phaser', 'dist')));
@@ -38,7 +41,10 @@ const npcs = new Map();      // id -> wandering NPC trainer (ws:null, isNPC:true
 const battles = new Map();   // id -> battle session
 let nextId = 1;
 let nextBattleId = 1;
-const NUM_CHARS = 19;        // char_00 .. char_18
+let nextWildId = -1;      // wild mons count downwards, away from real entities
+// walk_0 blonde girl · walk_1 dark-haired boy · walk_2 bearded hiker
+// walk_3 capped kid · walk_4 green-capped kid · walk_5 girl in a sun hat
+const NUM_CHARS = 6;         // walk_0 .. walk_5 — the animated overworld trainers
 const START_LEVEL = 5;
 
 function send(ws, obj) {
@@ -51,7 +57,8 @@ function broadcast(obj, exceptId) {
 }
 function publicPlayer(p) {
   return { id: p.id, name: p.name, charId: p.charId, x: p.x, y: p.y, dir: p.dir,
-           level: p.level, isNPC: !!p.isNPC, inBattle: !!p.battleId };
+           level: p.level, isNPC: !!p.isNPC, inBattle: !!p.battleId,
+           talk: !!p.talk, wild: !!p.isWild, overworld: p.overworld || null };
 }
 function randPlayable() { return PLAYABLE_KEYS[Math.floor(Math.random() * PLAYABLE_KEYS.length)]; }
 const entityWs = (e) => (e && e.ws) ? e.ws : null;     // NPCs have ws:null
@@ -157,15 +164,41 @@ function aiMove(mon, foe) {
   return best;
 }
 
+// ---- talking ----
+// Walking into a `talk` NPC opens a dialogue instead of a battle. The elder
+// hands the TM over the first time and has different things to say once you
+// hold it, and again once you've set it off.
+function talkTo(p, npc) {
+  const ws = entityWs(p);
+  // Some talkers won't give you the time of day until you've earned it.
+  if (npc.minLevel && p.level < npc.minLevel && !p.usedTwister) {
+    send(ws, { t: 'dialogue', name: npc.name, lines: npc.linesTooWeak, gave: null });
+    return;
+  }
+  const holds = !!p.bag.tmtwister;
+  let lines, gave = null;
+  if (p.usedTwister)   lines = npc.linesAfter;
+  else if (holds)      lines = npc.linesWaiting;
+  else {
+    lines = npc.linesGive;
+    p.bag.tmtwister = 1;
+    gave = ITEMS.tmtwister.name;
+  }
+  send(ws, { t: 'dialogue', name: npc.name, lines, gave, bag: bagView(p) });
+  if (gave) send(ws, { t: 'progress', you: progress(p) });
+}
+
 // ---- battle logic ----
 // `a` is always a connected player; `b` may be another player or an NPC trainer.
 function startBattle(a, b) {
   const id = nextBattleId++;
-  const monA = makeMon(a.species || randPlayable(), a.level || START_LEVEL);
-  const monB = makeMon(b.species || randPlayable(), b.level || START_LEVEL);
+  const monA = makeMon(a.species || randPlayable(), a.level || START_LEVEL, a.learned);
+  const monB = makeMon(b.species || randPlayable(), b.level || START_LEVEL, b.learned);
   const battle = { id, sides: { [a.id]: { entity: a, mon: monA, choice: null },
                                 [b.id]: { entity: b, mon: monB, choice: null } }, order: [a.id, b.id] };
   battles.set(id, battle);
+  if (b.isNPC && !b.isWild && a.met) a.met.add(b.id);
+  if (a.isNPC && !a.isWild && b.met) b.met.add(a.id);
   a.battleId = id; b.battleId = id;
   for (const pid of battle.order) {
     const me = battle.sides[pid];
@@ -327,6 +360,165 @@ function forfeit(playerId) {
   if (battle) endBattle(battle, playerId);
 }
 
+// ---- tall grass ----
+// Every step taken on an 'H' tile is one roll for a wild encounter. The wild mon
+// is a throwaway entity: it has no socket and never joins `npcs`, so once the
+// battle ends it simply stops existing.
+function maybeWildEncounter(p) {
+  if (p.battleId || map.GROUND[p.y][p.x] !== 'H') return;
+  if (Math.random() >= ENCOUNTER_CHANCE) return;
+  spawnWild(p);
+}
+
+function spawnWild(p) {
+  if (p.battleId) return;
+  const key = WILD_POOL[Math.floor(Math.random() * WILD_POOL.length)];
+  const wild = {
+    id: nextWildId--, name: `Wild ${SPECIES[key].name}`, species: key,
+    level: wildLevel(p.level), isNPC: true, isWild: true, ws: null,
+    line: '', bag: {}, learned: [],
+  };
+  startBattle(p, wild);
+}
+
+// Somewhere worth standing for each part of the game, for the debug warp.
+const WARPS = {
+  plaza:  { x: 10, y: 7 },   grass:  { x: 4,  y: 7 },
+  mart:   { x: 10, y: 4 },   cave:   { x: 14, y: 24 },
+  elder:  { x: 14, y: 42 },  desert: { x: 14, y: 46 },
+};
+
+// ---- the Twister ----
+// What the trainers you've already beaten shout when they come running. The
+// first one is the line that matters; the rest are colour. Rewrite freely.
+const CROWD_LINES = [
+  "Wow! That was a big explosion!",
+  "I felt that through my boots up on the ridge.",
+  "The whole mountain went sideways. What did you DO?",
+  "I lost a Potion down a crack. Worth it.",
+  "You blew a hole in the world, kid.",
+  "My ears are still ringing. Do it again.",
+  "That wall stood for four hundred years.",
+  "Someone tell the mart. Tell everyone.",
+  "I came running the second I heard it.",
+  "Right. I'm following you through that hole.",
+  "Sand. Why is there sand coming out of it?",
+  "So THAT'S what the old man was guarding.",
+  "You've gone and done it now.",
+  "Beekeeper's going to want a word.",
+];
+
+// How long the crowd stands about in the cave before going back to their posts.
+const CROWD_STAY_MS = 15000;
+
+// Every trainer you've beaten drops what they're doing and crowds in around you.
+// Their home is deliberately NOT changed: they have to go back afterwards, or
+// the plaza is left empty for everyone and the wander leash pins them down here.
+function gatherCrowd(p) {
+  const taken = new Set([...players.values(), ...npcs.values()].map(o => `${o.x},${o.y}`));
+  // Never let anyone stand in the gap they just watched appear, or wander out
+  // onto the sand — the crowd would wall the player back in.
+  const inGap = (t) => map.SECRET_EXIT.some((e) => e.x === t.x && e.y === t.y);
+  const spots = map.walkableIn(p.y - 5, p.y + 1)
+    .filter(t => !taken.has(`${t.x},${t.y}`) && !inGap(t) && t.y < map.DESERT_TOP)
+    .sort((a, b) => (Math.abs(a.x - p.x) + Math.abs(a.y - p.y)) -
+                    (Math.abs(b.x - p.x) + Math.abs(b.y - p.y)));
+  const crowd = [], came = [];
+  [...p.met].map(id => npcs.get(id)).filter(Boolean).forEach((npc, i) => {
+    const spot = spots[i];
+    if (!spot) return;
+    npc.x = spot.x; npc.y = spot.y;
+    broadcast({ t: 'moved', id: npc.id, x: npc.x, y: npc.y, dir: 'up' });
+    crowd.push({ name: npc.name, text: CROWD_LINES[i % CROWD_LINES.length] });
+    came.push(npc);
+  });
+
+  // Send them back to where they belong once the moment has passed.
+  setTimeout(() => {
+    for (const npc of came) {
+      if (npc.battleId) continue;              // don't yank someone mid-fight
+      npc.x = npc.homeX; npc.y = npc.homeY;
+      broadcast({ t: 'moved', id: npc.id, x: npc.x, y: npc.y, dir: 'down' });
+    }
+  }, CROWD_STAY_MS);
+
+  return crowd;
+}
+
+// The blast doesn't only open a wall. Every trainer that heard it — and the one
+// who set it off — is wrung back down to level 1. The wild Dragonite out in the
+// sand heard nothing and are untouched.
+function resetLevels(p) {
+  for (const npc of npcs.values()) {
+    if (npc.isWild || !npc.level) continue;
+    npc.level = 1;
+    broadcast({ t: 'playerLevel', id: npc.id, level: 1 });
+  }
+  p.level = 1;
+  p.xp = 0;
+  broadcast({ t: 'playerLevel', id: p.id, level: 1 });
+}
+
+// The one-shot story beat: teach the move, blow the wall, pull the crowd in.
+// Only works standing near the sealed wall — the TM does nothing anywhere else.
+const NEAR_EXIT = (p) => map.SECRET_EXIT.some(
+  (e) => Math.abs(e.x - p.x) + Math.abs(e.y - p.y) <= 4);
+
+function fireTwister(p) {
+  p.bag.tmtwister -= 1;
+  if (p.bag.tmtwister <= 0) delete p.bag.tmtwister;
+  if (!p.learned.includes('twister')) p.learned.push('twister');
+  p.usedTwister = true;
+
+  const opened = map.openSecretExit();
+  const crowd = gatherCrowd(p);
+  resetLevels(p);
+
+  send(p.ws, {
+    t: 'twister',
+    lines: [
+      `${SPECIES[p.species].name} learned Twister!`,
+      "You turn to the wall and call the move.",
+      "The air in the chamber starts to turn. Dust climbs the walls.",
+      "Then it lets go.",
+    ],
+    crowd,
+    after: [
+      "Elder Baran: \"Forty years. An afternoon.\"",
+      "The south wall is gone. Hot air pours in through the gap.",
+      "Beyond it: sand, to the horizon.",
+      "",
+      "Something else went with the wall.",
+      "Every trainer in the pass is sat down, staring at their Pokémon.",
+      "Yours too. Level 1. All of it, gone.",
+    ],
+    tiles: opened,
+    bag: bagView(p),
+  });
+  send(p.ws, { t: 'progress', you: progress(p) });
+
+  // everyone else just feels it
+  if (opened.length) broadcast({ t: 'exitOpened', tiles: opened }, p.id);
+  broadcast({ t: 'chat', id: 0, name: '—', text:
+              `A blast tears through the mountain pass. ${p.name} did something.` }, p.id);
+}
+
+// ---- death in the desert ----
+// The sand is a hard level gate, not a fight you can lose gracefully.
+function blackout(p) {
+  const spawn = map.randomSpawn();
+  p.x = spawn.x; p.y = spawn.y; p.dir = 'down';
+  send(p.ws, { t: 'died', x: p.x, y: p.y, lines: [
+    "You step out onto the sand.",
+    "The heat arrives first. Then the shadow.",
+    "Wings. Dozens of pairs of them, blotting out the sun.",
+    "The Dragonite do not fight you. They simply arrive.",
+    `${p.name} died in the desert.`,
+    "You wake on the plaza floor with sand in your teeth.",
+  ] });
+  broadcast({ t: 'moved', id: p.id, x: p.x, y: p.y, dir: 'down' });
+}
+
 // ---- the mart ----
 // The shop is wherever the map draws an 'M'; standing next to any of its three
 // tiles is close enough to be served.
@@ -337,7 +529,7 @@ for (let y = 0; y < map.H; y++)
       for (let dx = 0; dx < 3; dx++) MART_TILES.add(`${x + dx},${y}`);
 const atShop = (p) => [[0, 1], [0, -1], [1, 0], [-1, 0]]
   .some(([dx, dy]) => MART_TILES.has(`${p.x + dx},${p.y + dy}`));
-const CATALOGUE = Object.entries(ITEMS).map(([key, it]) => ({
+const CATALOGUE = Object.entries(ITEMS).filter(([, it]) => !it.noShop).map(([key, it]) => ({
   key, name: it.name, price: it.price, heal: it.heal || 0, cures: it.cures || [],
 }));
 
@@ -348,11 +540,14 @@ wss.on('connection', (ws) => {
   const p = { id, name: 'TrainerJD', charId: (id - 1) % NUM_CHARS,
               x: spawn.x, y: spawn.y, dir: 'down', ws, battleId: null, line: '',
               species: randPlayable(), level: START_LEVEL, xp: 0,
-              bag: { ...STARTING_BAG }, money: STARTING_MONEY };
+              bag: { ...STARTING_BAG }, money: STARTING_MONEY,
+              // story state: who you've fought, what TMs taught you, and whether
+              // you've already set the Twister off
+              met: new Set(), learned: [], usedTwister: false };
   players.set(id, p);
 
   send(ws, {
-    t: 'init', id, tile: map.TILE, w: map.W, h: map.H,
+    t: 'init', id, tile: map.TILE, w: map.W, h: map.H, debug: DEBUG,
     ground: map.GROUND, objects: map.OBJECTS,
     you: publicPlayer(p), progress: progress(p),
     players: [...players.values()].filter(o => o.id !== id).map(publicPlayer)
@@ -414,12 +609,17 @@ wss.on('connection', (ws) => {
       if (occupant) {
         me.dir = dir || me.dir;
         broadcast({ t: 'moved', id, x: me.x, y: me.y, dir: me.dir });
-        startBattle(me, occupant);
+        // Some NPCs talk instead of fighting. Everyone else throws hands.
+        if (occupant.talk) talkTo(me, occupant);
+        else startBattle(me, occupant);
         return;
       }
       if (map.isBlocked(tx, ty)) { broadcast({ t: 'moved', id, x: me.x, y: me.y, dir: me.dir }); return; }
+      // One step onto the sand under the gate level and that is the end of you.
+      if (ty >= map.DESERT_TOP && me.level < DESERT_LEVEL) { blackout(me); return; }
       me.x = tx; me.y = ty;
       broadcast({ t: 'moved', id, x: me.x, y: me.y, dir: me.dir });
+      maybeWildEncounter(me);
       return;
     }
 
@@ -463,6 +663,69 @@ wss.on('connection', (ws) => {
       return;
     }
 
+    // ---- debug ----
+    // Only ever live when the server was started with TWISTER_DEV=1, so none of
+    // this is reachable in normal play.
+    if (msg.t === 'debug' && DEBUG) {
+      const note = (text) => send(ws, { t: 'note', text: `Debug: ${text}` });
+      switch (msg.action) {
+        case 'level':
+          me.level = Math.max(1, Math.min(MAX_LEVEL, msg.value | 0));
+          me.xp = 0;
+          send(ws, { t: 'progress', you: progress(me) });
+          broadcast({ t: 'playerLevel', id, level: me.level });
+          note(`level set to ${me.level}.`);
+          break;
+        case 'money':
+          me.money = Math.max(0, me.money + (msg.value | 0));
+          send(ws, { t: 'progress', you: progress(me) });
+          note(`money is now ${me.money}.`);
+          break;
+        case 'tm':
+          me.bag.tmtwister = (me.bag.tmtwister || 0) + 1;
+          note('TM Twister added to your bag.');
+          break;
+        case 'encounter':
+          spawnWild(me);
+          break;
+        case 'warp': {
+          const w = WARPS[msg.value];
+          if (!w) break;
+          me.x = w.x; me.y = w.y; me.dir = 'down';
+          send(ws, { t: 'warped', x: w.x, y: w.y });
+          broadcast({ t: 'moved', id, x: w.x, y: w.y, dir: 'down' });
+          note(`warped to the ${msg.value}.`);
+          break;
+        }
+        case 'openexit': {
+          const opened = map.openSecretExit();
+          if (opened.length) broadcast({ t: 'exitOpened', tiles: opened });
+          note(opened.length ? 'secret exit opened.' : 'the exit was already open.');
+          break;
+        }
+        case 'resetstory':
+          me.usedTwister = false;
+          me.met.clear();
+          me.learned = [];
+          delete me.bag.tmtwister;
+          note('story state reset — the wall stays open.');
+          break;
+        default: break;
+      }
+      return;
+    }
+
+    // ---- the TM ----
+    if (msg.t === 'useTm') {
+      if (me.battleId || !me.bag.tmtwister) return;
+      if (!NEAR_EXIT(me)) {
+        send(ws, { t: 'note', text: 'You raise the TM. Nothing here answers it.' });
+        return;
+      }
+      fireTwister(me);
+      return;
+    }
+
     if (msg.t === 'battleFlee' && me.battleId) { forfeit(id); return; }
   });
 
@@ -480,37 +743,81 @@ wss.on('connection', (ws) => {
 const NPC_DEFS = [
   { name: 'Youngster Milo',  level: 6,  species: 'charmander',  charId: 1,  x: 11, y: 7,
     line: "First battle of the day. Go easy on me!" },
-  { name: 'Lass Priya',      level: 8,  species: 'sprigatito',  charId: 15, x: 16, y: 7,
+  { name: 'Lass Priya',      level: 8,  species: 'sprigatito',  charId: 0, x: 16, y: 7,
     line: "My Sprigatito's been practising all week." },
-  { name: 'Swimmer Otto',    level: 10, species: 'quaxly',      charId: 6,  x: 17, y: 10,
+  { name: 'Swimmer Otto',    level: 10, species: 'quaxly',      charId: 1,  x: 17, y: 10,
     line: "Water's fine! Get in." },
-  { name: 'Hiker Bruno',     level: 15, species: 'onix',        charId: 3,  x: 6,  y: 13,
+  { name: 'Hiker Bruno',     level: 15, species: 'onix',        charId: 2,  x: 6,  y: 13,
     line: "You'll not dent this one, kid." },
-  { name: 'Firebreather Rue',level: 20, species: 'arcanine',    charId: 8,  x: 22, y: 5,
+  { name: 'Firebreather Rue',level: 20, species: 'arcanine',    charId: 4,  x: 22, y: 5,
     line: "Feel that heat? That's my Arcanine." },
-  { name: 'Psychic Nadia',   level: 25, species: 'alakazam',    charId: 12, x: 5,  y: 4,
+  { name: 'Psychic Nadia',   level: 25, species: 'alakazam',    charId: 5, x: 5,  y: 4,
     line: "I already know which move you'll pick." },
-  { name: 'Blackbelt Deniz', level: 30, species: 'machamp',     charId: 4,  x: 24, y: 15,
+  { name: 'Blackbelt Deniz', level: 30, species: 'machamp',     charId: 3,  x: 24, y: 15,
     line: "Four arms. One outcome." },
-  { name: 'Hex Maniac Wren', level: 34, species: 'gengar',      charId: 17, x: 3,  y: 10,
+  { name: 'Hex Maniac Wren', level: 34, species: 'gengar',      charId: 5, x: 3,  y: 10,
     line: "Shhh. It's already behind you." },
-  { name: 'Ace Trainer Vera',level: 38, species: 'meowscarada', charId: 10, x: 9,  y: 16,
+  { name: 'Ace Trainer Vera',level: 38, species: 'meowscarada', charId: 0, x: 9,  y: 16,
     line: "No more warm-ups. Show me the real thing." },
-  { name: 'Knight Sable',    level: 42, species: 'kingambit',   charId: 13, x: 20, y: 17,
+  { name: 'Knight Sable',    level: 42, species: 'kingambit',   charId: 3, x: 20, y: 17,
     line: "Kneel, or be knelt." },
-  { name: 'Dragon Tamer Ivo',level: 46, species: 'baxcalibur',  charId: 2,  x: 14, y: 17,
+  { name: 'Dragon Tamer Ivo',level: 46, species: 'baxcalibur',  charId: 4,  x: 14, y: 17,
     line: "Ice and dragon. Nothing you have beats both." },
-  { name: 'Beekeeper',       level: 52, species: 'roaringmoon', charId: 18, x: 24, y: 3,
+  { name: 'Beekeeper',       level: 52, species: 'roaringmoon', charId: 2, x: 24, y: 3,
     line: "Seen a Combee round here? No? ...Figures. My Roaring Moon ate the hive." },
 
   // ---- the mountain pass (rows 22-43) ----
   // The ladder continues underground. Free slots, all checked walkable:
   //   west chamber  (4,30) (9,32)   east chamber  (18,29) (23,32)
   //   deep chamber  (6,37) (21,37) (9,40) (14,42)
-  { name: 'Miner Cato',      level: 16, species: 'onix',         charId: 0,  x: 9,  y: 24,
+  { name: 'Miner Cato',      level: 16, species: 'onix',         charId: 2,  x: 9,  y: 24,
     line: "Been swinging a pick down here since sun-up. Arms like rope." },
-  { name: 'Hiker Solvi',     level: 19, species: 'machamp',      charId: 5,  x: 18, y: 25,
+  { name: 'Hiker Solvi',     level: 19, species: 'machamp',      charId: 3,  x: 18, y: 25,
     line: "These tunnels build shoulders. Want to see?" },
+
+  // ---- the elder (deep chamber, right in front of the sealed wall) ----
+  // He fights nobody. Walk into him and he talks; the first talk hands over the
+  // TM. All three sets of lines are yours to rewrite.
+  { name: 'Elder Baran', talk: true, still: true, charId: 2, x: 14, y: 41,
+    minLevel: 30,
+    linesTooWeak: [
+      "Stop there. I can hear what you're carrying from here.",
+      "It is not ready, and neither are you.",
+      "Come back when you have taken something to level 30. Not before.",
+    ],
+    linesGive: [
+      "Far enough, young one. This wall is where the pass ends.",
+      "Or so the miners believe. I have sat with it forty years.",
+      "There is a wind sleeping in the rock. It answers to one move only.",
+      "Take this. It is the last one. Teach it to everything you carry.",
+    ],
+    linesWaiting: [
+      "You are holding it. Good.",
+      "Do not waste it in a battle. Use it HERE, facing the wall.",
+      "Press T when you are ready, and stand back.",
+    ],
+    linesAfter: [
+      "You heard it too, then. Forty years, and it took you an afternoon.",
+      "Go on through. But listen — the sands past that wall are not empty.",
+      "Dragonite. Dozens of them. They do not share the desert.",
+      "Anything under level 55 that walks out there does not walk back.",
+    ] },
+
+  // ---- the desert (only reachable once the wall comes down) ----
+  // Wild Dragonite. There is no catching in this game, and there never will be
+  // for these — they are here to be survived, not collected.
+  { name: 'Wild Dragonite', level: 55, species: 'dragonite', charId: 7, isWild: true, overworld: 'dragonite', x: 7,  y: 47,
+    line: "It does not acknowledge you. It simply moves." },
+  { name: 'Wild Dragonite', level: 57, species: 'dragonite', charId: 7, isWild: true, overworld: 'dragonite', x: 20, y: 51,
+    line: "It has circled this dune since before the pass was sealed." },
+  { name: 'Wild Dragonite', level: 56, species: 'dragonite', charId: 7, isWild: true, overworld: 'dragonite', x: 12, y: 57,
+    line: "No ball you own means anything out here." },
+  { name: 'Wild Dragonite', level: 58, species: 'dragonite', charId: 7, isWild: true, overworld: 'dragonite', x: 4,  y: 54,
+    line: "It watched you come through the wall. It was not impressed." },
+  { name: 'Wild Dragonite', level: 60, species: 'dragonite', charId: 7, isWild: true, overworld: 'dragonite', x: 23, y: 59,
+    line: "The oldest of them. The sand around it is glass." },
+  { name: 'Wild Dragonite', level: 59, species: 'dragonite', charId: 7, isWild: true, overworld: 'dragonite', x: 16, y: 44,
+    line: "It landed between you and the way back." },
 ];
 
 // Catch a typo'd coordinate the moment the server boots, rather than leaving a
@@ -520,18 +827,25 @@ for (const d of NPC_DEFS) {
 }
 NPC_DEFS.forEach((d, i) => {
   const id = 10001 + i;
-  npcs.set(id, { id, name: d.name, line: d.line, charId: d.charId, species: d.species,
-                 level: d.level, x: d.x, y: d.y, homeX: d.x, homeY: d.y, dir: 'down',
+  npcs.set(id, { ...d, id, homeX: d.x, homeY: d.y, dir: 'down',
                  battleId: null, isNPC: true, ws: null });
 });
 
 setInterval(() => {
   for (const npc of npcs.values()) {
-    if (npc.battleId || Math.random() < 0.45) continue;   // often idle
+    if (npc.still || npc.battleId || Math.random() < 0.45) continue;   // often idle
     const dirs = [[1, 0, 'right'], [-1, 0, 'left'], [0, 1, 'down'], [0, -1, 'up']];
     const [dx, dy, dir] = dirs[Math.floor(Math.random() * dirs.length)];
     const nx = npc.x + dx, ny = npc.y + dy;
     npc.dir = dir;
+    // If something has left them stranded far from home, head back instead of
+    // wandering — otherwise the leash below freezes them wherever they stand.
+    const fromHome = Math.abs(npc.x - npc.homeX) + Math.abs(npc.y - npc.homeY);
+    if (fromHome > 6) {
+      npc.x = npc.homeX; npc.y = npc.homeY;
+      broadcast({ t: 'moved', id: npc.id, x: npc.x, y: npc.y, dir: 'down' });
+      continue;
+    }
     const leashed = Math.abs(nx - npc.homeX) + Math.abs(ny - npc.homeY) > 3;
     if (leashed || map.isBlocked(nx, ny) || tileTaken(nx, ny, npc.id)) {
       broadcast({ t: 'moved', id: npc.id, x: npc.x, y: npc.y, dir });   // just turn
@@ -544,7 +858,7 @@ setInterval(() => {
 
 server.listen(PORT, () => {
   console.log(`\n  Pokémon Twister Version running:  http://localhost:${PORT}`);
-  const levels = NPC_DEFS.map(d => d.level);
+  const levels = NPC_DEFS.filter(d => d.level).map(d => d.level);
   console.log(`  ${Object.keys(SPECIES).length} species · ${npcs.size} trainers, Lv ` +
               `${Math.min(...levels)}–${Math.max(...levels)}\n`);
 });

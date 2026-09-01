@@ -10,13 +10,22 @@ class BootScene extends Phaser.Scene {
     this.load.image('floor',       '/assets/tiles/floor.png');
     this.load.image('stone',       '/assets/tiles/stone.png');
     this.load.image('rubble',      '/assets/tiles/rubble.png');
+    this.load.image('sand',        '/assets/tiles/sand.png');
+    this.load.image('dune',        '/assets/tiles/dune.png');
+    this.load.image('tallgrass',   '/assets/tiles/tallgrass.png');
     this.load.image('tree',   '/assets/objects/tree.png');
     this.load.image('mart',   '/assets/objects/mart.png');
     this.load.image('rock',   '/assets/objects/rock.png');
-    for (let i = 0; i < 19; i++) {
-      const id = String(i).padStart(2, '0');
-      this.load.image(`char_${id}`, `/assets/chars/char_${id}.png`);
+    this.load.image('cactus', '/assets/objects/cactus.png');
+    // Walking trainers: six sheets of 4x4 frames (down/left/right/up, four frames
+    // each) sliced by tools/slice_walkers.py. The wild Dragonite use the same
+    // layout at a smaller frame size.
+    for (let i = 0; i < 6; i++) {
+      this.load.spritesheet(`walk_${i}`, `/assets/chars/walk_${i}.png`,
+        { frameWidth: 32, frameHeight: 48 });
     }
+    this.load.spritesheet('walk_dragonite', '/assets/mons/walk_dragonite.png',
+      { frameWidth: 32, frameHeight: 32 });
 
     // The roster lives in server/data.js; pull the list, then queue one battle
     // sprite per species. Files added from `filecomplete` still load in this pass.

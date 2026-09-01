@@ -77,6 +77,7 @@ const MOVES = {
   dragonclaw:    { name: 'Dragon Claw',    type: 'dragon',   power: 80 },
   glaiverush:    { name: 'Glaive Rush',    type: 'dragon',   power: 120 },
   outrage:       { name: 'Outrage',        type: 'dragon',   power: 120 },
+  twister:       { name: 'Twister',        type: 'dragon',   power: 85 },
   // dark
   bite:          { name: 'Bite',           type: 'dark',     power: 60 },
   knockoff:      { name: 'Knock Off',      type: 'dark',     power: 65 },
@@ -134,6 +135,8 @@ const ITEMS = {
   burnheal:    { name: 'Burn Heal',    price: 250,  cures: ['brn'] },
   awakening:   { name: 'Awakening',    price: 250,  cures: ['slp'] },
   fullheal:    { name: 'Full Heal',    price: 600,  cures: ['par', 'frz', 'brn', 'psn', 'slp'] },
+  // Story item. Not for sale — the elder in the mountain pass is the only source.
+  tmtwister:   { name: 'TM Twister',   price: 0,    tm: 'twister', noShop: true },
 };
 const STARTING_BAG = { potion: 2, paralyzheal: 1 };
 const STARTING_MONEY = 800;
@@ -143,8 +146,9 @@ const moneyForWin = (foeLevel) => 40 + foeLevel * 14;
 // There's one attacking stat rather than a physical/special split, so `atk` is
 // whichever of Attack or Special Attack the species actually fights with —
 // otherwise Gengar and Alakazam would punch like they use their fists.
-// `tier` gates what a player may pick as their partner: 'starter' and 'strong'
-// are choosable, 'boss' mons belong to NPC trainers only.
+// `tier` says what a species is for: the six 'starter' mons are the only ones a
+// player may pick, 'wild' ones turn up in the tall grass, 'strong' and 'boss'
+// belong to NPC trainers. PLAYABLE_KEYS below is the list the picker actually uses.
 const SPECIES = {
   // ---------------- Gen 1 ----------------
   bulbasaur:  { name: 'Bulbasaur',  gen: 1, dex: 1,   tier: 'starter', types: ['grass','poison'],
@@ -159,7 +163,7 @@ const SPECIES = {
                 base: { hp: 44, atk: 50, def: 65, spd: 43 }, moves: ['tackle','watergun','iceshard','bite'] },
   blastoise:  { name: 'Blastoise',  gen: 1, dex: 9,   tier: 'strong',  types: ['water'],
                 base: { hp: 79, atk: 85, def: 100, spd: 78 }, moves: ['surf','aquatail','icebeam','bodyslam'] },
-  pikachu:    { name: 'Pikachu',    gen: 1, dex: 25,  tier: 'starter', types: ['electric'],
+  pikachu:    { name: 'Pikachu',    gen: 1, dex: 25,  tier: 'wild'   , types: ['electric'],
                 base: { hp: 35, atk: 55, def: 40, spd: 90 }, moves: ['quickattack','thundershock','thunderbolt','ironhead'] },
   arcanine:   { name: 'Arcanine',   gen: 1, dex: 59,  tier: 'strong',  types: ['fire'],
                 base: { hp: 90, atk: 110, def: 80, spd: 95 }, moves: ['flamethrower','bite','wingattack','bodyslam'] },
@@ -169,13 +173,13 @@ const SPECIES = {
                 base: { hp: 90, atk: 130, def: 80, spd: 55 }, moves: ['karatechop','closecombat','knockoff','stoneedge'] },
   gengar:     { name: 'Gengar',     gen: 1, dex: 94,  tier: 'strong',  types: ['ghost','poison'],
                 base: { hp: 60, atk: 130, def: 60, spd: 110 }, moves: ['hypnosis','shadowball','sludgebomb','darkpulse'] },
-  onix:       { name: 'Onix',       gen: 1, dex: 95,  tier: 'starter', types: ['rock','ground'],
+  onix:       { name: 'Onix',       gen: 1, dex: 95,  tier: 'wild'   , types: ['rock','ground'],
                 base: { hp: 35, atk: 45, def: 160, spd: 70 }, moves: ['tackle','rockthrow','mudshot','rockslide'] },
   gyarados:   { name: 'Gyarados',   gen: 1, dex: 130, tier: 'strong',  types: ['water','flying'],
                 base: { hp: 95, atk: 125, def: 79, spd: 81 }, moves: ['aquatail','crunch','airslash','wavecrash'] },
   lapras:     { name: 'Lapras',     gen: 1, dex: 131, tier: 'strong',  types: ['water','ice'],
                 base: { hp: 130, atk: 85, def: 80, spd: 60 }, moves: ['surf','icebeam','bodyslam','iciclecrash'] },
-  eevee:      { name: 'Eevee',      gen: 1, dex: 133, tier: 'starter', types: ['normal'],
+  eevee:      { name: 'Eevee',      gen: 1, dex: 133, tier: 'wild'   , types: ['normal'],
                 base: { hp: 55, atk: 55, def: 50, spd: 55 }, moves: ['tackle','quickattack','bite','bodyslam'] },
   snorlax:    { name: 'Snorlax',    gen: 1, dex: 143, tier: 'strong',  types: ['normal'],
                 base: { hp: 160, atk: 110, def: 65, spd: 30 }, moves: ['bodyslam','crunch','earthquake','hyperbeam'] },
@@ -267,6 +271,9 @@ function typeEffect(atkType, defTypes) {
 
 // ---- level maths (the standard Pokémon shape, with flat IVs/EVs) ----
 const MAX_LEVEL = 60;
+// The desert is lethal below this. Beekeeper caps the ladder at 52, so surviving
+// the sands means beating him and then grinding three more levels.
+const DESERT_LEVEL = 55;
 const hpAt   = (base, lvl) => Math.floor((base * 2 * lvl) / 100) + lvl + 10;
 const statAt = (base, lvl) => Math.floor((base * 2 * lvl) / 100) + 5;
 
@@ -274,7 +281,7 @@ const statAt = (base, lvl) => Math.floor((base * 2 * lvl) / 100) + 5;
 const xpToNext = (level) => 14 + level * 9;
 const xpForWin = (foeLevel) => 10 + foeLevel * 6;
 
-function makeMon(key, level) {
+function makeMon(key, level, learned) {
   const s = SPECIES[key];
   const lvl = Math.max(1, Math.min(MAX_LEVEL, Math.round(level)));
   const maxhp = hpAt(s.base.hp, lvl);
@@ -282,16 +289,37 @@ function makeMon(key, level) {
     key, name: s.name, gen: s.gen, dex: s.dex, types: s.types.slice(), level: lvl,
     maxhp, hp: maxhp,
     atk: statAt(s.base.atk, lvl), def: statAt(s.base.def, lvl), spd: statAt(s.base.spd, lvl),
-    moves: s.moves.slice(),
+    moves: [...new Set([...s.moves, ...(learned || [])])],
     status: null, sleepTurns: 0,
   };
 }
 
 const SPECIES_KEYS = Object.keys(SPECIES);
-const PLAYABLE_KEYS = SPECIES_KEYS.filter((k) => SPECIES[k].tier !== 'boss');
+
+// The only six a player may pick: one starter per type from each generation.
+// Everything else in the roster belongs to NPC trainers or turns up in the grass.
+const STARTER_KEYS = ['bulbasaur', 'charmander', 'squirtle',
+                      'sprigatito', 'fuecoco', 'quaxly'];
+const PLAYABLE_KEYS = STARTER_KEYS;
+
+// What lives in the tall grass. Deliberately none of the six — a starter is
+// something you choose, not something you tread on.
+const WILD_POOL = ['pikachu', 'eevee', 'onix', 'pawmot', 'tinkaton', 'glimmora'];
+
+// One roll per step taken in grass.
+const ENCOUNTER_CHANCE = 0.12;
+
+// Wild levels track the player, so grass stays worth walking through at any
+// point in the game — including after the Twister wipes everyone back to 1.
+function wildLevel(playerLevel) {
+  const lo = Math.max(2, playerLevel - 3);
+  const hi = Math.min(MAX_LEVEL, Math.max(lo, playerLevel + 1));
+  return lo + Math.floor(Math.random() * (hi - lo + 1));
+}
 
 module.exports = {
-  MOVES, SPECIES, TYPE_CHART, SPECIES_KEYS, PLAYABLE_KEYS, MAX_LEVEL,
-  STATUS, ITEMS, STARTING_BAG, STARTING_MONEY,
+  MOVES, SPECIES, TYPE_CHART, SPECIES_KEYS, PLAYABLE_KEYS, STARTER_KEYS, MAX_LEVEL,
+  WILD_POOL, ENCOUNTER_CHANCE, wildLevel,
+  STATUS, ITEMS, STARTING_BAG, STARTING_MONEY, DESERT_LEVEL,
   typeEffect, makeMon, xpToNext, xpForWin, moneyForWin,
 };

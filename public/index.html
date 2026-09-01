@@ -33,13 +33,48 @@
       </div>
     </div>
 
+    <!-- Debug panel. Only ever shown when the server runs with TWISTER_DEV=1. -->
+    <div id="debugPanel" class="hidden">
+      <div class="dbgHead">debug<span id="dbgPos"></span></div>
+      <div class="dbgRow">
+        <label for="dbgLevel">Lv</label>
+        <input id="dbgLevel" type="number" min="1" max="60" value="30" />
+        <button data-dbg="level">set level</button>
+        <button data-dbg="money">+5000</button>
+      </div>
+      <div class="dbgRow">
+        <button data-dbg="tm">give TM</button>
+        <button data-dbg="encounter">wild battle</button>
+        <button data-dbg="openexit">open wall</button>
+        <button data-dbg="resetstory">reset story</button>
+      </div>
+      <div class="dbgRow">
+        <button data-warp="plaza">plaza</button>
+        <button data-warp="grass">grass</button>
+        <button data-warp="mart">mart</button>
+        <button data-warp="cave">cave</button>
+        <button data-warp="elder">elder</button>
+        <button data-warp="desert">desert</button>
+      </div>
+      <div class="dbgHint">` toggles this panel</div>
+    </div>
+
+    <!-- Dialogue / cutscene box. One line at a time; Space, Enter or click advances. -->
+    <div id="dialogueOverlay" class="hidden">
+      <div class="dlgBox">
+        <div id="dlgName"></div>
+        <p id="dlgText"></p>
+        <span id="dlgMore">▼</span>
+      </div>
+    </div>
+
     <div id="nameOverlay">
       <div class="panel">
         <h1>Pokémon&nbsp;Twister&nbsp;Version</h1>
-        <p>Gen 1 + Gen 9 · beat the trainer ladder up to the Beekeeper</p>
+        <p>Gen 1 + Gen 9 · pick a starter, beat the ladder up to the Beekeeper</p>
         <input id="nameInput" type="text" maxlength="16" placeholder="Trainer name" autocomplete="off" />
         <input id="lineInput" type="text" maxlength="70" placeholder="Battle line (what you say before a fight)" autocomplete="off" />
-        <select id="partnerSelect"><option value="">Partner Pokémon — random</option></select>
+        <select id="partnerSelect"><option value="">Starter Pokémon — random</option></select>
         <button id="enterBtn">Enter world</button>
       </div>
     </div>

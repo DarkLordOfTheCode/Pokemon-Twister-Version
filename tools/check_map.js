@@ -12,15 +12,25 @@ if (map.GROUND.length !== map.OBJECTS.length)
   if (r.length !== map.W) fail(`a row is ${r.length} wide, want ${map.W} (row ${i % map.H})`);
 });
 
-// flood fill from the plaza — anything walkable but unreached is walled off
-const seen = new Set(), stack = [[10, 9]];
-while (stack.length) {
-  const [x, y] = stack.pop();
-  const k = `${x},${y}`;
-  if (seen.has(k) || map.isBlocked(x, y)) continue;
-  seen.add(k);
-  stack.push([x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]);
+// Flood fill from the plaza. The desert is *meant* to be unreachable until the
+// story blows the wall open, so we fill twice: once sealed (to see how far a new
+// player gets) and once opened (where nothing may be stranded).
+function fill() {
+  const seen = new Set(), stack = [[10, 9]];
+  while (stack.length) {
+    const [x, y] = stack.pop();
+    const k = `${x},${y}`;
+    if (seen.has(k) || map.isBlocked(x, y)) continue;
+    seen.add(k);
+    stack.push([x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]);
+  }
+  return seen;
 }
+const sealed = fill();
+map.openSecretExit();
+const seen = fill();
+if (sealed.size >= seen.size) fail('the secret exit opens nothing — check the X tiles');
+console.log(`sealed: ${sealed.size} tiles reachable · after the blast: ${seen.size}`);
 let walkable = 0, stranded = [];
 for (let y = 0; y < map.H; y++)
   for (let x = 0; x < map.W; x++)
